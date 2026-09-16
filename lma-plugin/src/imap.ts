@@ -33,7 +33,8 @@ export function applyResult(db: Db, supplier: { id: number; email: string }, typ
       .run(supplier.email, 'reply_keyword', now, operator, 'IMAP 关键词识别')
     db.prepare(`UPDATE supplier SET status = 'unsubscribed', updated_at = datetime('now') WHERE id = ?`).run(supplier.id)
     audit(db, operator, 'unsubscribe_auto', 'supplier', supplier.id, { source: 'reply_keyword' })
-  } else {
+  } else if (type === 'replied') {
+    // delivered 只记录事件，不得改变供应商状态（否则会被误判为"已回复"而阻断跟进）
     db.prepare(`UPDATE supplier SET status = 'replied', replied_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
       .run(supplier.id)
   }
@@ -87,6 +88,21 @@ export async function pollOnce(db: Db): Promise<{ skipped: boolean; handled?: nu
             for (const h of ['in-reply-to', 'references']) {
               const val = headers?.get?.(h) ?? ''
               const ids = String(val).match(/<[^>]+>/g) ?? []
+              for (const id of ids) {
+                const supId = sentMetaByMsgId.get(id.replace(/[<>]/g, '').trim())
+                if (supId) {
+                  supplier = db.prepare('SELECT id, email FROM supplier WHERE id = ?').get(supId) as { id: number; email: string } | undefined
+                  break
+                }
+              }
+              if (supplier) break
+            }
+          }
+          // 回退：部分 IMAP 服务端的 envelope 不含 headers，从原始邮件头解析 In-Reply-To/References
+          if (!supplier && text) {
+            const headerBlock = text.slice(0, Math.min(text.length, 16384))
+            for (const line of headerBlock.match(/^(in-reply-to|references):[ \t]*([^\r\n]+([ \t]+\S[^\r\n]*)*)/gim) ?? []) {
+              const ids = line.match(/<[^>]+>/g) ?? []
               for (const id of ids) {
                 const supId = sentMetaByMsgId.get(id.replace(/[<>]/g, '').trim())
                 if (supId) {

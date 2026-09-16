@@ -205,39 +205,56 @@ export function executeImport(
     )
   }
 
+  // 处理单行（校验 + 去重 + 写入）；校验不通过返回 'failed'，写入冲突抛异常由外层 savepoint 兜底
+  const processRow = (row: string[], i: number): 'inserted' | 'updated' | 'skipped' | 'failed' => {
+    const base = normalizeRow(row, mapping, defaults)
+    const reason: string[] = []
+    if (!base.email || !isValidEmail(base.email)) reason.push('邮箱缺失或格式错误')
+    if (!base.company_name) reason.push('公司名称缺失')
+    if (!base.country) reason.push('国家缺失且未指定默认国家')
+    if (reason.length) {
+      if (failures.length < 2000) failures.push({ row: i + 2, reason: reason.join('；') })
+      return 'failed'
+    }
+
+    const dup = findDup.get(base.email) as { id: number; company_name: string } | undefined
+    const dupFile = seenEmails.has(base.email as string)
+    if (dup || dupFile) {
+      if (strategy === 'skip') return 'skipped'
+      if (strategy === 'update' && dup) {
+        updateStmt.run(
+          base.company_name, base.contact_name, base.email, base.extra_emails, base.phone, base.fax,
+          base.website, base.business, base.networks, base.profile, base.address, base.country,
+          base.timezone, base.region, base.preferred_language, base.external_id, base.enrolled_since,
+          sourceNote.trim(), batchId, dup.id,
+        )
+        return 'updated'
+      }
+      if (dup && dup.company_name === base.company_name) return 'skipped'
+    }
+    insert(base)
+    seenEmails.add(base.email as string)
+    return 'inserted'
+  }
+
   db.exec('BEGIN')
   try {
     rows.forEach((row, i) => {
-      const base = normalizeRow(row, mapping, defaults)
-      const reason: string[] = []
-      if (!base.email || !isValidEmail(base.email)) reason.push('邮箱缺失或格式错误')
-      if (!base.company_name) reason.push('公司名称缺失')
-      if (!base.country) reason.push('国家缺失且未指定默认国家')
-      if (reason.length) {
+      // 逐行 savepoint：单行唯一约束冲突等写入错误只废掉该行，不拖垮整个导入事务
+      db.exec('SAVEPOINT lma_row')
+      try {
+        const outcome = processRow(row, i)
+        db.exec('RELEASE lma_row')
+        if (outcome === 'inserted') success++
+        else if (outcome === 'updated') updated++
+        else if (outcome === 'failed') failed++
+        else skipped++
+      } catch (e) {
+        db.exec('ROLLBACK TO lma_row')
+        db.exec('RELEASE lma_row')
         failed++
-        if (failures.length < 2000) failures.push({ row: i + 2, reason: reason.join('；') })
-        return
+        if (failures.length < 2000) failures.push({ row: i + 2, reason: `写入失败：${(e as Error).message}` })
       }
-
-      const dup = findDup.get(base.email) as { id: number; company_name: string } | undefined
-      const dupFile = seenEmails.has(base.email as string)
-      if (dup || dupFile) {
-        if (strategy === 'skip') { skipped++; return }
-        if (strategy === 'update' && dup) {
-          updateStmt.run(
-            base.company_name, base.contact_name, base.email, base.extra_emails, base.phone, base.fax,
-            base.website, base.business, base.networks, base.profile, base.address, base.country,
-            base.timezone, base.region, base.preferred_language, base.external_id, base.enrolled_since,
-            sourceNote.trim(), batchId, dup.id,
-          )
-          updated++
-          return
-        }
-        if (dup && dup.company_name === base.company_name) { skipped++; return }
-      }
-      insert(base)
-      success++
-      seenEmails.add(base.email as string)
     })
     db.exec('COMMIT')
   } catch (e) {

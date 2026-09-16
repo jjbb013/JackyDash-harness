@@ -1,0 +1,12 @@
+{
+  // 客户端（浏览器）投影：src/client → lib/types（供 tsdown client 面打包成 lib/client.js）
+  "extends": "../tsconfig.base.client.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "tsBuildInfoFile": "lib/tsconfig.client.tsbuildinfo"
+  },
+  "include": [
+    "src/client"
+  ]
+}

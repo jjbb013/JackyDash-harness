@@ -13,12 +13,14 @@ import { buildLmaTools } from './tools.ts'
 import { initQueueState, processDue } from './sendqueue.ts'
 import { startImapPolling } from './imap.ts'
 import { checkFollowups } from './followup.ts'
+import { startWebServer } from './web/server.ts'
 
 export const name = 'lma'
 export const inject = ['tools']
 
 const DB_PATH = process.env.LMA_DB_PATH ?? path.join(process.cwd(), 'lma-data', 'lma.db')
 const BACKUP_DIR = process.env.LMA_DB_BACKUP_DIR ?? ''
+const HTTP_PORT = Number(process.env.LMA_HTTP_PORT ?? 3081)
 
 function seedDefaults(db: ReturnType<typeof openDb>): void {
   if (!getConfig(db, 'profile', null)) setConfig(db, 'profile', TRANSTAR_PROFILE, 'seed')
@@ -26,10 +28,12 @@ function seedDefaults(db: ReturnType<typeof openDb>): void {
   if (!getConfig(db, 'send_policy', null)) setConfig(db, 'send_policy', DEFAULT_SEND_POLICY, 'seed')
 }
 
-function backupDb(): void {
+function backupDb(db: ReturnType<typeof openDb>): void {
   if (!BACKUP_DIR || !fs.existsSync(DB_PATH)) return
   try {
     fs.mkdirSync(BACKUP_DIR, { recursive: true })
+    // 先把 WAL 落盘，再复制 db 文件，避免备份缺最近提交
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
     const stamp = new Date().toISOString().slice(0, 10)
     fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, `lma-${stamp}.db`))
     // 保留最近 14 份
@@ -50,10 +54,11 @@ export function apply(ctx: Context): void {
   console.log(`[lma] SQLite 就绪：${DB_PATH}（WAL）`)
 
   // 注册全部业务工具
-  for (const tool of buildLmaTools(db)) {
+  const lmaTools = buildLmaTools(db)
+  for (const tool of lmaTools) {
     ctx.tools.register(tool)
   }
-  console.log(`[lma] 已注册 ${buildLmaTools(db).length} 个 lma_* 工具`)
+  console.log(`[lma] 已注册 ${lmaTools.length} 个 lma_* 工具`)
 
   // 定时任务（ctx.effect 自动清理；均 unref，不阻塞进程退出）
   ctx.effect(() => {
@@ -78,12 +83,21 @@ export function apply(ctx: Context): void {
 
     // 数据库每日备份（可选）
     if (BACKUP_DIR) {
-      const backupTick = setInterval(backupDb, 24 * 3600_000)
+      const backupTick = setInterval(() => backupDb(db), 24 * 3600_000)
       backupTick.unref?.()
       timers.push(backupTick)
     }
 
-    return () => timers.forEach((t) => clearInterval(t))
+    // LMA Web 仪表盘 + 邮件退订端点（dsh 客户端插件经 iframe 嵌入 / 页面）
+    const webServer = startWebServer(db, HTTP_PORT)
+    webServer.unref?.()
+    console.log(`[lma] Web 仪表盘已启动：http://127.0.0.1:${HTTP_PORT}/（退订端点 /unsubscribe；生产环境将 LMA_BASE_URL 反代到该端口）`)
+
+    return () => {
+      timers.forEach((t) => clearInterval(t))
+      webServer.close()
+      try { db.close() } catch { /* 已关闭 */ }
+    }
   })
 
   console.log('[lma] LMA 物流推广智能体系统插件已加载。工具前缀 lma_*；知识库 lma_project_knowledge')

@@ -114,7 +114,18 @@ export async function generateDraft(db: Db, supplier: SupplierLike, match: Match
         `我方画像：${JSON.stringify(profile)}\n对方：${supplier.company_name}（${supplier.country ?? '未知'}），主营：${supplier.business ?? '未知'}，网络：${supplier.networks ?? '未知'}，介绍：${(supplier.profile ?? '').slice(0, 500)}。\n匹配度 ${match.score}，分析：${match.analysis}` },
     ], 800)
     const j = extractJson(content)
-    if (j?.subject && j?.body) return { subject: String(j.subject).trim(), body: String(j.body).trim() }
+    if (j?.subject && j?.body) {
+      const subject = String(j.subject).trim().slice(0, tpl.subjectMax)
+      const body = String(j.body).trim()
+      // 后置硬校验：禁用词与字数上限不依赖 prompt 自觉（F-AI-04/05）
+      const lower = `${subject}\n${body}`.toLowerCase()
+      const hit = (tpl.bannedWords || []).find((w) => w && lower.includes(String(w).toLowerCase()))
+      if (hit) throw new Error(`AI 草稿包含禁用词「${hit}」，已拒绝落库，请重新生成`)
+      if (body.split(/\s+/).filter(Boolean).length > tpl.bodyMaxWords) {
+        throw new Error(`AI 草稿正文超过 ${tpl.bodyMaxWords} 词上限，已拒绝落库，请重新生成`)
+      }
+      return { subject, body }
+    }
     throw new Error('AI 返回格式无法解析')
   }
 

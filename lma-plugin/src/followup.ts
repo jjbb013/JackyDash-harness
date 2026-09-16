@@ -50,5 +50,5 @@ export async function checkFollowups(db: Db, operator: string | null = null): Pr
 }
 
 function baseUrl(): string {
-  return (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3080').replace(/\/+$/, '')
+  return (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
 }

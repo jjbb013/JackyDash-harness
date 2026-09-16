@@ -2,7 +2,7 @@
 import type { Db } from './db.ts'
 import { getEmailTemplate } from './db.ts'
 import { sqlNow } from './util.ts'
-import { buildFooter, type SupplierLike } from './ai.ts'
+import { buildFooter, unsubscribeToken, type SupplierLike } from './ai.ts'
 
 export interface DraftLike {
   id: number
@@ -16,7 +16,7 @@ const SMTP_SECURE = (process.env.LMA_SMTP_SECURE ?? 'true') !== 'false'
 const SMTP_USER = process.env.LMA_SMTP_USER ?? ''
 const SMTP_PASS = process.env.LMA_SMTP_PASS ?? ''
 const MAIL_FROM = process.env.LMA_MAIL_FROM ?? SMTP_USER
-const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3080').replace(/\/+$/, '')
+const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
 
 let transport: unknown = null
 
@@ -41,7 +41,8 @@ async function getTransport(): Promise<unknown> {
 
 export async function sendDraftMail(db: Db, draft: DraftLike, supplier: SupplierLike): Promise<{ messageId: string | null; mode: string }> {
   const text = draft.body + buildFooter(db, supplier, BASE_URL)
-  const unsubLink = `${BASE_URL}/unsubscribe?e=${encodeURIComponent(supplier.email)}&t=__TOKEN__`
+  // List-Unsubscribe 头使用与正文页脚一致的真实退订 token
+  const unsubLink = `${BASE_URL}/unsubscribe?e=${encodeURIComponent(supplier.email)}&t=${unsubscribeToken(supplier.email)}`
 
   let messageId: string | null = null
   if (smtpConfigured()) {

@@ -134,6 +134,13 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
     expect(q.isError).toBe(false)
   })
 
+  it('8b) 重复发送同一草稿被拒绝（幂等）', async () => {
+    const r = await call('lma_send', { draft_id: draftId })
+    expect(r.isError).toBe(true)
+    const text = (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join(' ')
+    expect(text).toMatch(/队列中|已发送/)
+  })
+
   it('9) 事件补录（管理员）：回复 → 需人工处理', async () => {
     const r = await call('lma_event_record', { supplier_id: supplierId, type: 'replied', note: 'test', operator: 'test-admin' })
     expect(r.isError).toBe(false)

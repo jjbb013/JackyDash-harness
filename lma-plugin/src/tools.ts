@@ -20,7 +20,7 @@ import { csvLine, isValidEmail, splitMulti, sqlNow } from './util.ts'
 import { localTimeString, countryToTimezone } from './timezone.ts'
 import { PROJECT_KNOWLEDGE } from './knowledge.ts'
 
-const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3080').replace(/\/+$/, '')
+const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
 const ADMINS = new Set((process.env.LMA_ADMINS ?? '').split(',').map((s) => s.trim()).filter(Boolean))
 const DEFAULT_OPERATOR = process.env.LMA_OPERATOR ?? 'harness-agent'
 const MAX_BYTES = 5 * 1024 * 1024
@@ -83,6 +83,8 @@ function textTool(spec: ToolSpec): ToolDefinition {
 }
 
 const num = (v: unknown, d: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d }
+// 允许 0（用于关闭节流等场景）
+const num0 = (v: unknown, d: number) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d }
 
 // ================= 工具定义 =================
 export function buildLmaTools(db: Db): ToolDefinition[] {
@@ -389,7 +391,7 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
           `SELECT d.id, d.supplier_id, d.subject, d.body, d.language, d.match_score, d.match_analysis, d.created_at,
                   s.company_name, s.email, s.country
            FROM email_draft d JOIN supplier s ON s.id = d.supplier_id
-           WHERE d.status = ? ORDER BY d.id DESC LIMIT ? OFFSET ?`,
+           WHERE d.status = ? AND s.deleted_at IS NULL ORDER BY d.id DESC LIMIT ? OFFSET ?`,
         ).all(status, size, (page - 1) * size) as unknown[]
         return { total, page, size, drafts }
       },
@@ -446,6 +448,10 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         const draft = db.prepare('SELECT * FROM email_draft WHERE id = ?').get(id) as { status: string; supplier_id: number; subject: string; body: string } | undefined
         if (!draft) throw new Error('草稿不存在')
         if (draft.status !== 'approved') throw new Error('只有 approved 状态的草稿才能发送（F-SEND-02）')
+        // 幂等：同一草稿禁止重复入队/重复发送
+        if (queueSnapshot().some((q) => q.draftId === id)) throw new Error('该草稿已在发送队列中，请勿重复入队')
+        const alreadySent = db.prepare(`SELECT 1 FROM email_event WHERE draft_id = ? AND event_type = 'sent'`).get(id)
+        if (alreadySent) throw new Error('该草稿已发送过，禁止重复发送')
         const supplier = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(draft.supplier_id) as
           { id: number; email: string; timezone: string | null; status: string } | undefined
         if (!supplier) throw new Error('供应商不存在')
@@ -590,7 +596,7 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         } else if (section === 'send_policy') {
           const cur = getSendPolicy(db)
           const next = { ...cur }
-          if (args.interval_minutes !== undefined) next.intervalMinutes = num(args.interval_minutes, cur.intervalMinutes)
+          if (args.interval_minutes !== undefined) next.intervalMinutes = num0(args.interval_minutes, cur.intervalMinutes)
           if (args.daily_limit !== undefined) next.dailyLimit = num(args.daily_limit, cur.dailyLimit)
           if (args.check_working_hours !== undefined) next.checkWorkingHours = Boolean(args.check_working_hours)
           if (args.work_start !== undefined) next.workStart = num(args.work_start, cur.workStart)
