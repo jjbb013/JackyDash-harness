@@ -44,3 +44,6 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+
+# LMA plugin runtime data (SQLite, uploads staging)
+lma-data/

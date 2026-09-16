@@ -13,6 +13,8 @@ packages:
   # Deploy root of the single-exe build: a pure dependency manifest whose
   # closure is what the exe bundles and what the Python runtime distributes.
   - python/sdk-runtime
+  # LMA 物流推广智能体系统插件（二开业务包，仅依赖登记，不改动 Harness 代码）
+  - lma-plugin
 
 overrides:
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'

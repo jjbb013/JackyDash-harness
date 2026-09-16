@@ -1,0 +1,4 @@
+# LMA 插件加载补丁：pnpm dsh web --patch ./lma-plugin/cordis.yml
+- insert:
+    - id: lma
+      name: '/home/user/Doubao/chats/38442059919236866/JackyDash-harness/lma-plugin/src/index.ts'

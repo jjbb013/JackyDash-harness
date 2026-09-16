@@ -791,6 +791,8 @@ importers:
         specifier: ^1.49.0
         version: 1.61.1
 
+  lma-plugin: {}
+
   native/system:
     devDependencies:
       '@deepseek-ai/node-addon-system':

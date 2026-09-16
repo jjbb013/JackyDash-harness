@@ -1,0 +1,90 @@
+// LMA 物流推广智能体系统 —— DeepSeek Harness 插件入口
+// 形态：Cordis 插件（name + apply + inject: ['tools']），加载后：
+//   1. 打开 SQLite（node:sqlite，WAL），执行迁移，写入默认配置
+//   2. 注册 23 个 lma_* 工具（模型可调用，完成导入/匹配/生成/审核/发送/追踪/配置/知识）
+//   3. 注册应用内定时任务：发送队列 tick、IMAP 轮询（可选）、跟进检查（可选）、SQLite 备份（可选）
+// 加载：pnpm dsh web --patch ./lma-plugin/cordis.yml
+// 环境变量：见 README.md；LMA_DB_PATH 默认 <仓库根>/lma-data/lma.db
+import fs from 'node:fs'
+import path from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import { openDb, setConfig, getConfig, TRANSTAR_PROFILE, DEFAULT_EMAIL_TEMPLATE, DEFAULT_SEND_POLICY } from './db.ts'
+import { buildLmaTools } from './tools.ts'
+import { initQueueState, processDue } from './sendqueue.ts'
+import { startImapPolling } from './imap.ts'
+import { checkFollowups } from './followup.ts'
+
+export const name = 'lma'
+export const inject = ['tools']
+
+const DB_PATH = process.env.LMA_DB_PATH ?? path.join(process.cwd(), 'lma-data', 'lma.db')
+const BACKUP_DIR = process.env.LMA_DB_BACKUP_DIR ?? ''
+
+function seedDefaults(db: ReturnType<typeof openDb>): void {
+  if (!getConfig(db, 'profile', null)) setConfig(db, 'profile', TRANSTAR_PROFILE, 'seed')
+  if (!getConfig(db, 'email_template', null)) setConfig(db, 'email_template', DEFAULT_EMAIL_TEMPLATE, 'seed')
+  if (!getConfig(db, 'send_policy', null)) setConfig(db, 'send_policy', DEFAULT_SEND_POLICY, 'seed')
+}
+
+function backupDb(): void {
+  if (!BACKUP_DIR || !fs.existsSync(DB_PATH)) return
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true })
+    const stamp = new Date().toISOString().slice(0, 10)
+    fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, `lma-${stamp}.db`))
+    // 保留最近 14 份
+    const files = fs.readdirSync(BACKUP_DIR).filter((f) => /^lma-\d{4}-\d{2}-\d{2}\.db$/.test(f)).sort()
+    for (const f of files.slice(0, Math.max(0, files.length - 14))) {
+      fs.unlinkSync(path.join(BACKUP_DIR, f))
+    }
+    console.log(`[lma] SQLite 备份完成：${BACKUP_DIR}/lma-${stamp}.db`)
+  } catch (e) {
+    console.error('[lma] SQLite 备份失败：', (e as Error).message)
+  }
+}
+
+export function apply(ctx: Context): void {
+  const db = openDb(DB_PATH)
+  seedDefaults(db)
+  initQueueState(db)
+  console.log(`[lma] SQLite 就绪：${DB_PATH}（WAL）`)
+
+  // 注册全部业务工具
+  for (const tool of buildLmaTools(db)) {
+    ctx.tools.register(tool)
+  }
+  console.log(`[lma] 已注册 ${buildLmaTools(db).length} 个 lma_* 工具`)
+
+  // 定时任务（ctx.effect 自动清理；均 unref，不阻塞进程退出）
+  ctx.effect(() => {
+    const timers: NodeJS.Timeout[] = []
+
+    // 发送队列：每 15 秒处理到期项
+    const sendTick = setInterval(() => {
+      processDue(db).catch((e) => console.error('[lma] send-queue tick error', (e as Error).message))
+    }, 15_000)
+    sendTick.unref?.()
+    timers.push(sendTick)
+
+    // IMAP 轮询：由 imap.ts 自管首轮与 5 分钟间隔（F-TRACK-01）
+    try { startImapPolling(db) } catch (e) { console.error('[lma] IMAP 启动失败：', (e as Error).message) }
+
+    // 跟进检查：每 6 小时扫描一次（默认只生成草稿）
+    const followTick = setInterval(() => {
+      checkFollowups(db, 'schedule').catch((e) => console.error('[lma] followup tick error', (e as Error).message))
+    }, 6 * 3600_000)
+    followTick.unref?.()
+    timers.push(followTick)
+
+    // 数据库每日备份（可选）
+    if (BACKUP_DIR) {
+      const backupTick = setInterval(backupDb, 24 * 3600_000)
+      backupTick.unref?.()
+      timers.push(backupTick)
+    }
+
+    return () => timers.forEach((t) => clearInterval(t))
+  })
+
+  console.log('[lma] LMA 物流推广智能体系统插件已加载。工具前缀 lma_*；知识库 lma_project_knowledge')
+}

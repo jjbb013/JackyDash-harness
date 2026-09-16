@@ -1,0 +1,9 @@
+{
+  "name": "@lma/dsh-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "LMA 物流推广智能体系统 —— DeepSeek Harness 二开插件（工具 + 定时任务 + SQLite）",
+  "dependencies": {},
+  "peerDependencies": {}
+}
