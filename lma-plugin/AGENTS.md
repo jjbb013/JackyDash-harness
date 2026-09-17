@@ -9,7 +9,10 @@
 ## 关键事实（做任何改动前必须知道）
 
 - **技术约束**：单机 1 核 2G；Node 22；SQLite 用 `node:sqlite`（内置 `DatabaseSync`，零原生依赖，禁止引入 better-sqlite3）；不发真邮件时用 log 模式；IMAP/nodemailer 为可选依赖（`try/catch` 动态导入，缺了自动降级）。
-- **业务硬限制（来自 PRD v1.2）**：单次导入 ≤5000 行；发送节流每封约 3 分钟（可配）、每日上限（默认 20）；对方当地时间 9-18 非工作时段排队；IMAP 每 5 分钟轮询；跟进 3 天×最多 2 封（默认只生成草稿，`autoFollowup=false`）；退订名单所有发送前必查且实时生效；页脚来源声明+退订链接服务端固定追加；仅 `approved` 草稿可发送。
+- **⚠️ 发信/收信的假成功陷阱**：`mailer.ts` 的 `smtpConfigured()` 只看环境变量，**不看 `nodemailer` 是否真的加载成功**。填了 `LMA_SMTP_*` 却没装 nodemailer 时，事件仍写成 `mode:"smtp"` 但 `messageId` 为 `null`——实际没发出去。判断是否真发，必须同时看 `mode` 与 `messageId`。IMAP 同理需要 `imapflow`。
+- **⚠️ 环境变量在模块加载时读取**（`mailer.ts`/`imap.ts` 顶层 `const`），改 `LMA_SMTP_*`/`LMA_IMAP_*`/`LMA_BASE_URL` 后**必须重启 `dsh web`**才生效。
+- **业务硬限制（来自 PRD v1.2）**：单次导入 ≤5000 行；发送节流每封约 3 分钟（可配）、每日上限（默认 20）；对方当地时间 9-18 非工作时段排队；IMAP 每 5 分钟轮询；跟进 3 天×最多 2 封（默认只生成草稿，`autoFollowup=false`）；退订名单所有发送前必查且实时生效；页脚来源声明 + 退订方式由服务端固定追加；仅 `approved` 草稿可发送。
+- **退订是回信制**：页脚与 `List-Unsubscribe` 都是 `mailto:`（回复时把 `unsubscribe`/`退订` 写在**主题**里），由 IMAP 关键词识别自动退订；HTTP `/unsubscribe` 端点仅在未配发件地址时兜底。改 `classify()`/`UNSUB_KEYWORDS` 必须同步 `business.spec.ts` 的分类断言。
 - **字段/数据模型**：适配 WCA 导出模板——`emails`/`contacts`/`networks` 分号多值（主邮箱取第一个，其余存 `extra_emails` JSON）、`profile` 长文本、`city` 含邮编存 `region`、`id` 存 `external_id`、`enrolled_since` 直存；`Netherlands` → `NL` → `Europe/Amsterdam`；语言默认 `en`。
 - **我方画像**：Shanghai Transtar International Freight Forwarding Co., Ltd.（2022 年成立；八大服务：清关合规/多式联运/保税智慧仓 5万㎡/集拼/项目物流/门到门/冷链与 ISO TANK/贸易咨询；优势：本土化、100+ 承运商成本、AI TMS、24/7 双语；目标市场 NL/DE/GB/US/AU/SG/FR/BE/IT/ES）。画像在 `db.ts` 默认值，可经 `lma_config_update` 覆盖。
 - **角色模型**：`admin`/`staff` 由 `LMA_ADMINS` 环境变量区分的操作者名单体现（插件运行于 Harness 内，登录由 Harness 负责）。写操作工具（导入/配置/补录事件/跟进/退订处理）校验 `args.operator ∈ LMA_ADMINS`，测试里用 `test-admin`。
@@ -30,7 +33,7 @@ src/index.ts ── openDb(迁移) + seedDefaults + 注册工具 + ctx.effect �
 
 ## 测试
 
-`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。
+`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **46/46**。
 `tests/harness.spec.ts` 证明插件在 dsh 内可加载可执行（`new Context()` + `ctx.plugin(SystemPrompt)` + `ctx.plugin(ToolRuntime)` + `ctx.tools.register(buildLmaTools(db))` + `ctx.tools.execute(...)`）。
 新增工具必须在此文件登记断言；改导入管道必须跑真实 `wca_netherlands.csv` 夹具用例。
 

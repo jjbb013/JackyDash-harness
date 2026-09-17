@@ -84,17 +84,115 @@ pnpm --filter @lma/dsh-plugin run build:client   # tsc → lib/types，tsdown �
 | `LMA_DB_BACKUP_DIR` | 空（不备份） | 每日备份目录（保留 14 份） |
 | `LMA_ADMINS` | 空 | 管理员操作者名单（逗号分隔）。**写操作（导入/审核/发送/配置/补录事件/跟进）会校验，非管理员被拒绝** |
 | `LMA_OPERATOR` | `harness-agent` | 工具未传 operator 时默认审计操作者 |
-| `LMA_BASE_URL` | `http://127.0.0.1:3081` | 退订链接域名（须指向本插件 Web 服务；生产改成你的 HTTPS 域名并反代到 `LMA_HTTP_PORT`） |
+| `LMA_BASE_URL` | `http://127.0.0.1:3081` | HTTP 退订端点域名。**仅在未配置发件地址时**作为页脚兜底（默认走回信退订，见 §五）；生产可改 HTTPS 域名反代到 `LMA_HTTP_PORT` |
 | `LMA_HTTP_PORT` | `3081` | 插件内置 Web 服务端口：`/` 仪表盘、`/unsubscribe` 退订端点、`/api/*` JSON API（绑 127.0.0.1，Node 原生 http，零依赖） |
-| `LMA_COOKIE_SECRET` | `lma-dev-secret` | 退订 token HMAC 密钥 |
+| `LMA_COOKIE_SECRET` | `lma-dev-secret` | HTTP 退订 token 的 HMAC 密钥。⚠️ 默认值是开发用弱密钥，且 token 确定性、无过期机制——把 `/unsubscribe` 暴露到公网前**务必换成强随机值** |
 | `LMA_AI_MODE` | `mock` | `mock` 离线规则 / `api` 对接 OpenAI 兼容接口 |
 | `LMA_AI_URL` / `LMA_AI_KEY` / `LMA_AI_MODEL` | 空 / 空 / `deepseek-chat` | api 模式必填（也兼容任意 OpenAI 兼容服务） |
-| `LMA_SMTP_HOST/PORT/SECURE/USER/PASS` | 空 | 填了走真实 SMTP；不填走 log 模式（只记录事件） |
-| `LMA_MAIL_FROM` | SMTP_USER | 发件人 |
-| `LMA_IMAP_ENABLED/HOST/PORT/TLS/USER/PASS` | false / 空 | `LMA_IMAP_ENABLED=true` 开启每 5 分钟轮询 |
+| `LMA_SMTP_HOST/PORT/SECURE/USER/PASS` | 空 | 填了走真实 SMTP；不填走 log 模式（只记录事件）。⚠️ 还需装 `nodemailer`，否则会**假报成功**，详见 §五 |
+| `LMA_MAIL_FROM` | SMTP_USER | 发件人；同时作为**回信退订地址**（页脚 mailto + `List-Unsubscribe` 头） |
+| `LMA_IMAP_ENABLED/HOST/PORT/TLS/USER/PASS` | false / 空 | `LMA_IMAP_ENABLED=true` 开启每 5 分钟轮询（回复 / 退信 / **退订关键词**）。需装 `imapflow`，关键词与判定规则见 §五 |
 | `LMA_AI_URL` 未配且 `LMA_AI_KEY` 为空 | — | mock 模式，无需任何密钥即可本地跑通 |
 
-## 五、工具清单（模型可调用）
+## 五、邮件投递与退订（SMTP / IMAP）
+
+### 5.1 两种投递模式
+
+| 模式 | 触发条件 | 表现 |
+|---|---|---|
+| `log`（默认） | 未配 `LMA_SMTP_HOST/USER`，或 `nodemailer` 未安装 | 不发真邮件，只写 `email_event`；日志出现 `[lma:mail:log]` |
+| `smtp` | 配了 `LMA_SMTP_HOST/USER` **且** `nodemailer` 能加载 | 真投递，事件的 `messageId` 是服务商返回的真实 ID |
+
+判断一封是否真的发出去了，只看事件里这两个字段：
+
+```json
+{"mode":"smtp","messageId":"<xxx@gmail.com>","to":"a@b.com","subject":"..."}
+```
+
+> ⚠️ **必须装 `nodemailer`**。它是可选依赖（`try/catch` 动态 `import`），而 `mailer.ts` 的
+> `smtpConfigured()` **只检查环境变量、不看依赖是否加载成功**——没装 nodemailer 时，
+> 事件照样写成 `mode:"smtp"`（但 `messageId` 为 `null`），实际一封都没发出去。
+> IMAP 同理需要 `imapflow`。
+
+```bash
+# 两个可选依赖都没写进 package.json，按需安装
+cd lma-plugin && npm install nodemailer imapflow --no-save
+```
+
+### 5.2 Gmail 测试配置（示例）
+
+Gmail 不接受账号登录密码，必须用**应用专用密码**：先开启两步验证，再到
+<https://myaccount.google.com/apppasswords> 生成 16 位密码（显示成 4 组，空格可去掉）。
+
+```bash
+# 发信（SMTP，465 + SSL 正好是插件默认值）
+LMA_SMTP_HOST=smtp.gmail.com
+LMA_SMTP_PORT=465
+LMA_SMTP_SECURE=true
+LMA_SMTP_USER=you@gmail.com
+LMA_SMTP_PASS=<16 位应用专用密码>
+LMA_MAIL_FROM=you@gmail.com
+
+# 收信轮询（IMAP：回复 / 退信 / 退订）
+LMA_IMAP_ENABLED=true
+LMA_IMAP_HOST=imap.gmail.com
+LMA_IMAP_PORT=993
+LMA_IMAP_TLS=true
+LMA_IMAP_USER=you@gmail.com
+LMA_IMAP_PASS=<同一个应用专用密码>
+```
+
+> ⚠️ **环境变量在模块加载时读取（`mailer.ts` / `imap.ts` 顶层 `const`），改完必须重启 `dsh web` 才生效。**
+> 建议先在重启前用独立脚本验证凭据（`python3 -c "import smtplib..."` 或 `openssl s_client`），避免白重启一次。
+
+> 容量与合规：Gmail 免费账号约 500 收件人/天，且用个人 Gmail 批量发推广邮件不符合 Google 条款、有被限制的风险。
+> Gmail 仅适合本地验证链路，正式投放请换 SendGrid / Resend / 阿里云邮件推送等服务商。
+
+### 5.3 退订：回信制（reply-to-unsubscribe）
+
+页脚与 `List-Unsubscribe` 头**都指向"回信"**，不依赖公网可达的退订页：
+
+```text
+To unsubscribe, reply to this email with "unsubscribe" in the subject line,
+or click: mailto:you@gmail.com?subject=Unsubscribe
+```
+```text
+List-Unsubscribe: <mailto:you@gmail.com?subject=Unsubscribe>
+```
+
+收件人回复后，IMAP 轮询（每 5 分钟）按关键词判定并自动处理：
+
+```text
+classify() 命中 → 写入 unsubscribe_list(source='reply_keyword')
+               → 供应商置为 unsubscribed
+               → 此后所有发送被 sendqueue 硬拦
+               → audit_log 记 unsubscribe_auto
+```
+
+**关键词**（`imap.ts`）：`unsubscribe` / `opt-out` / `退订` / `取消订阅` / `停止发送` / `不再接收` / `不再联系` / `配信停止` / `配信解除`。
+
+三条判定规则（都是踩过坑才补上的）：
+
+1. **主题优先**：`msg.envelope.subject` 由 IMAP 客户端解码，判定最可靠；页脚文案因此专门引导收件人把关键词写在**主题**里。
+2. **只看新增正文**：引用历史里必然带着我方页脚的 "unsubscribe" 字样，若扫全文会把**任何带引用的普通回复误判成退订**。
+   `newPortion()` 先剔除邮件头、引用行与常见分隔符，只对收件人新写的内容做匹配。
+3. **中文关键词不能包进 `\b(...)\b`**：`\b` 只在 ASCII 词与非词字符之间成立，中日文字符两侧都不构成词边界，
+   `\b退订\b` 在正常中文句子里**永远匹配不到**。ASCII 词用 `\b` 包裹、CJK 词裸列。
+
+### 5.4 轮询的安全边界
+
+`pollOnce()` 只处理「**首次外发之后**」的未读邮件（以 `email_event` 中最早的 `sent` 时间为界再往前留 2 天），
+并且 **`\Seen` 只加在真正匹配到供应商的邮件上**。否则会把收件箱里所有未读邮件（个人邮件、退信、服务通知）
+静默标记为已读——这是开轮询前必须确认的一条。
+
+匹配方式：发件人邮箱命中 `supplier.email`，或 `In-Reply-To` / `References` 命中某个 `sent` 事件的 `messageId`。
+
+### 5.5 HTTP 退订端点（兜底保留）
+
+`GET /unsubscribe?e=<email>&t=<hmac>` 仍在（`src/unsubscribe.ts`，常数时间校验 + 幂等写入），
+但只在**未配置 `LMA_MAIL_FROM` / `LMA_SMTP_USER`** 时才会出现在页脚里，作为本地/离线环境的后备路径。
+
+## 六、工具清单（模型可调用）
 
 `lma_dashboard` `lma_import_preview` `lma_import_confirm` `lma_import_logs` `lma_export_csv`
 `lma_suppliers` `lma_supplier_detail` `lma_supplier_edit` `lma_supplier_delete`
@@ -110,23 +208,25 @@ pnpm --filter @lma/dsh-plugin run build:client   # tsc → lib/types，tsdown �
 5. `lma_review_queue` → `lma_review {draft_id, action: "approve"}`
 6. `lma_send {draft_id}` → 入队（自动节流/工作时段/退订检查）
 
-## 六、本地测试
+## 七、本地测试
 
 ```bash
 pnpm vitest run --config lma-plugin/vitest.config.ts
 ```
 
-覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、发送队列（退订拦截/节流/事件落库）、IMAP 事件分类，以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
+当前 **46 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
 
-## 七、部署（1 核 2G 生产）
+## 八、部署（1 核 2G 生产）
 
 - `systemd` 托管：`ExecStart=/usr/bin/pnpm dsh web --patch /opt/harness/lma-plugin/cordis.yml`（配合 `Restart=always`）
-- Nginx 反代：Web UI 与 `/unsubscribe` 路径分开——`/unsubscribe` 反代到 `127.0.0.1:LMA_HTTP_PORT`（插件内置退订端点），`LMA_BASE_URL` 设为正式域名
+- 退订走**回信制**，无需把任何端口暴露到公网：页脚与 `List-Unsubscribe` 头都是 `mailto:`，IMAP 轮询按关键词自动退订
+- 只有在必须保留 HTTP 退订端点时，才用 Nginx **只反代 `/unsubscribe` 一条路径**到 `127.0.0.1:LMA_HTTP_PORT`（**不要整端口暴露**：同端口上还有仪表盘与 `/api/*` 写接口），并把 `LMA_COOKIE_SECRET` 换成强随机值
+- 上线前务必装好 `nodemailer`（发信）与 `imapflow`（收信），并在事件里确认 `mode:"smtp"` 且 `messageId` 非空
 - SQLite 每日备份（`LMA_DB_BACKUP_DIR`，备份前自动 WAL checkpoint）或 systemd timer 复制 `lma-data/lma.db`
 - 邮件走真实 SMTP 前，先用 log 模式 + 测试收件箱验证流程；`LMA_ADMINS` 配置两位业务伙伴的标识
 - 合规提醒：CSV 数据同样受新西兰 UEMA 2007 与 IPP 3A（2026-05-01 生效）约束，须能说清数据合法来源；正式发送前咨询当地法律顾问
 
-## 八、二开扩展点
+## 九、二开扩展点
 
 - **新增数据源**：写一个适配器产出 `{columns, rows}` 交给 `csvpipeline` 即可（PRD 4.2 可插拔管道）
 - **换 LLM**：`LMA_AI_URL` 指向任意 OpenAI 兼容端点
