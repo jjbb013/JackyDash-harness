@@ -14,11 +14,34 @@ const IMAP_PASS = process.env.LMA_IMAP_PASS ?? ''
 
 const BOUNCE_FROM = /(mailer-daemon|postmaster)/i
 const BOUNCE_SUBJ = /(delivery status notification|undeliverable|failed delivery|退回|退信|投递失败)/i
-const UNSUB_KEYWORDS = /\b(unsubscribe|opt\s*-?\s*out|退订|取消订阅)\b/i
+// \b 只在 ASCII 词与非词字符之间成立，中日文字符两侧都不构成词边界，
+// 因此中文关键词必须单独列出，绝不能包进 \b(...)\b 里（曾导致「退订/取消订阅」完全失效）
+const UNSUB_KEYWORDS = /(\bunsubscribe\b|\bopt[-\s]?out\b|退订|取消订阅|停止发送|不再接收|不再联系|配信停止|配信解除)/i
 
-function classify(from: string, subject: string, text: string): 'bounced' | 'unsubscribed' | 'replied' {
+// 引用历史里必然带着我方页脚的 "unsubscribe" 文案，直接扫全文会把普通回复误判成退订（假退订）。
+// 只取收件人新写的正文（剔除邮件头、引用块与常见分隔符）参与关键词判定。
+function newPortion(raw: string): string {
+  const sep = raw.search(/\r?\n\r?\n/)
+  const body = sep >= 0 ? raw.slice(sep) : raw
+  const cuts: RegExp[] = [
+    /\r?\n\s*>/,                                   // 引用行
+    /\r?\n-{2,}\s*(?:original message|原始邮件|転送)/i,
+    /\r?\n(?:on|le)\s.{0,80}wrote:/i,
+    /\r?\n_{8,}/,
+    /\r?\n(?:发件人|差出人|送信者|from)\s*[:：]/i,
+  ]
+  let cut = body.length
+  for (const p of cuts) {
+    const m = body.match(p)
+    if (m && m.index !== undefined && m.index < cut) cut = m.index
+  }
+  return body.slice(0, cut).split(/\r?\n/).filter((l) => !/^\s*>/.test(l)).join('\n')
+}
+
+export function classify(from: string, subject: string, text: string): 'bounced' | 'unsubscribed' | 'replied' {
   if (BOUNCE_FROM.test(from) || BOUNCE_SUBJ.test(subject)) return 'bounced'
-  if (UNSUB_KEYWORDS.test(subject + ' ' + text)) return 'unsubscribed'
+  // 主题由 IMAP envelope 解码，判定最可靠；正文只认新增内容
+  if (UNSUB_KEYWORDS.test(subject) || UNSUB_KEYWORDS.test(newPortion(text))) return 'unsubscribed'
   return 'replied'
 }
 
@@ -68,7 +91,12 @@ export async function pollOnce(db: Db): Promise<{ skipped: boolean; handled?: nu
     await client.connect()
     const lock = await client.getMailboxLock('INBOX')
     try {
-      const unseen = await client.search({ seen: false })
+      // 只扫描「首次外发之后」的未读邮件：否则会把收件箱全部历史与个人邮件都拉取一遍
+      const firstSent = db.prepare(`SELECT MIN(event_time) AS t FROM email_event WHERE event_type = 'sent'`).get() as { t: string | null }
+      if (!firstSent?.t) return { skipped: false, handled: 0 }
+      const since = new Date(String(firstSent.t).replace(' ', 'T') + 'Z')
+      since.setDate(since.getDate() - 2)
+      const unseen = await client.search({ seen: false, since })
       if (unseen.length) {
         for await (const msg of client.fetch(unseen, { envelope: true, source: true, uid: true })) {
           const fromRaw = msg.envelope?.from?.[0]?.address ?? ''
@@ -116,8 +144,9 @@ export async function pollOnce(db: Db): Promise<{ skipped: boolean; handled?: nu
           if (supplier) {
             applyResult(db, supplier, type, { from: fromEmail, subject, imapUid: msg.uid })
             handled++
+            // 仅把已匹配到供应商的邮件标记为已读；收件箱里其它未读邮件一律不碰
+            await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen'], { uid: true })
           }
-          await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen'], { uid: true })
         }
       }
     } finally {

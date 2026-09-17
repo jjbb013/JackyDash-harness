@@ -93,8 +93,13 @@ export async function matchSupplier(db: Db, supplier: SupplierLike): Promise<Mat
 export function buildFooter(db: Db, supplier: SupplierLike, baseUrl: string): string {
   const tpl = getEmailTemplate(db)
   const sourceLine = String(tpl.footerSource).replace('{source}', supplier.source || 'business list')
-  const link = `${baseUrl}/unsubscribe?e=${encodeURIComponent(supplier.email)}&t=${unsubscribeToken(supplier.email)}`
-  return `\n\n---\n${sourceLine}\nUnsubscribe: ${link}`
+  // 退订以「回信」为主（F-COMP-01）：回复时在主题写 unsubscribe，由 IMAP 关键词识别自动退订，
+  // 不再依赖公网可达的退订页；仅在未配置发件地址时回退到本地 HTTP 端点。
+  const replyTo = process.env.LMA_MAIL_FROM ?? process.env.LMA_SMTP_USER ?? ''
+  const unsub = replyTo
+    ? `To unsubscribe, reply to this email with "unsubscribe" in the subject line, or click: mailto:${replyTo}?subject=Unsubscribe`
+    : `To unsubscribe, reply to this email with "unsubscribe" in the subject line. Or visit: ${baseUrl}/unsubscribe?e=${encodeURIComponent(supplier.email)}&t=${unsubscribeToken(supplier.email)}`
+  return `\n\n---\n${sourceLine}\n${unsub}`
 }
 
 // ---------- 生成个性化推广邮件草稿（F-AI-03） ----------

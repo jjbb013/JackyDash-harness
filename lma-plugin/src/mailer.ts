@@ -41,8 +41,11 @@ async function getTransport(): Promise<unknown> {
 
 export async function sendDraftMail(db: Db, draft: DraftLike, supplier: SupplierLike): Promise<{ messageId: string | null; mode: string }> {
   const text = draft.body + buildFooter(db, supplier, BASE_URL)
-  // List-Unsubscribe 头使用与正文页脚一致的真实退订 token
-  const unsubLink = `${BASE_URL}/unsubscribe?e=${encodeURIComponent(supplier.email)}&t=${unsubscribeToken(supplier.email)}`
+  // List-Unsubscribe 头与正文页脚保持一致：优先 mailto 回信退订（RFC 2369 标准写法，
+  // 邮件客户端会显示「退订」按钮）；未配置发件地址时回退到本地 HTTP 端点。
+  const unsubLink = MAIL_FROM
+    ? `mailto:${MAIL_FROM}?subject=Unsubscribe`
+    : `${BASE_URL}/unsubscribe?e=${encodeURIComponent(supplier.email)}&t=${unsubscribeToken(supplier.email)}`
 
   let messageId: string | null = null
   if (smtpConfigured()) {

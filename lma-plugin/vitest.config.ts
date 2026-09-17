@@ -23,6 +23,7 @@ export default defineConfig({
       LMA_AI_URL: '',
       LMA_SMTP_HOST: '',
       LMA_SMTP_USER: '',
+      LMA_MAIL_FROM: '',
       LMA_IMAP_ENABLED: 'false',
       LMA_COOKIE_SECRET: 'lma-test-secret',
       LMA_BASE_URL: 'http://127.0.0.1:3080',

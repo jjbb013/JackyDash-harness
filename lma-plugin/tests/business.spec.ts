@@ -179,11 +179,58 @@ describe('AI 匹配与邮件生成（mock）', async () => {
     expect(d.body).toMatch(/reply|contact|call|回复/i)
   })
 
-  it('页脚固定包含来源声明与退订链接', () => {
-    const footer = buildFooter(db, supplier as never, 'http://127.0.0.1:3080')
-    expect(footer).toContain('source: WCA 2026')
-    expect(footer).toContain('/unsubscribe?e=')
-    expect(footer).toContain(unsubscribeToken(supplier.email))
+  it('页脚固定包含来源声明与退订方式（未配发件地址时回退 HTTP 端点）', () => {
+    const savedMailFrom = process.env.LMA_MAIL_FROM
+    const savedUser = process.env.LMA_SMTP_USER
+    delete process.env.LMA_MAIL_FROM
+    process.env.LMA_SMTP_USER = ''
+    try {
+      const footer = buildFooter(db, supplier as never, 'http://127.0.0.1:3080')
+      expect(footer).toContain('source: WCA 2026')
+      expect(footer).toContain('/unsubscribe?e=')
+      expect(footer).toContain(unsubscribeToken(supplier.email))
+    } finally {
+      if (savedMailFrom === undefined) delete process.env.LMA_MAIL_FROM
+      else process.env.LMA_MAIL_FROM = savedMailFrom
+      if (savedUser === undefined) delete process.env.LMA_SMTP_USER
+      else process.env.LMA_SMTP_USER = savedUser
+    }
+  })
+
+  it('配置发件地址后退订以回信（mailto）为主，不再暴露本地端点', () => {
+    const savedMailFrom = process.env.LMA_MAIL_FROM
+    process.env.LMA_MAIL_FROM = 'sender@example.com'
+    try {
+      const footer = buildFooter(db, supplier as never, 'http://127.0.0.1:3080')
+      expect(footer).toContain('mailto:sender@example.com?subject=Unsubscribe')
+      expect(footer).toContain('reply to this email')
+      expect(footer).not.toContain('127.0.0.1:3080/unsubscribe')
+    } finally {
+      if (savedMailFrom === undefined) delete process.env.LMA_MAIL_FROM
+      else process.env.LMA_MAIL_FROM = savedMailFrom
+    }
+  })
+})
+
+describe('退订关键词识别（IMAP 分类）', async () => {
+  const { classify } = await import('../src/imap.ts')
+
+  it('英文与中文关键词都能命中（中文曾因 \\b 完全失效）', () => {
+    expect(classify('a@b.com', 'unsubscribe', '')).toBe('unsubscribed')
+    expect(classify('a@b.com', 'Please Unsubscribe', '')).toBe('unsubscribed')
+    expect(classify('a@b.com', '请帮我退订', '')).toBe('unsubscribed')
+    expect(classify('a@b.com', 'Re: 合作洽谈', '我要取消订阅')).toBe('unsubscribed')
+    expect(classify('a@b.com', '配信停止のお願い', '')).toBe('unsubscribed')
+  })
+
+  it('引用历史里带我方页脚文案时不得误判为退订', () => {
+    const quoted = 'Re: ご提案\n\nよろしくお願いいたします。\n\n> To unsubscribe, reply to this email with "unsubscribe" in the subject line, or click: mailto:x@y.com?subject=Unsubscribe'
+    expect(classify('a@b.com', 'Re: ご提案', quoted)).toBe('replied')
+  })
+
+  it('退信识别不受影响', () => {
+    expect(classify('MAILER-DAEMON@google.com', 'Delivery Status Notification (Failure)', '')).toBe('bounced')
+    expect(classify('a@b.com', '退信通知：投递失败', '')).toBe('bounced')
   })
 })
 
