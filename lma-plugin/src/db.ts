@@ -15,6 +15,8 @@ const MIGRATIONS: string[] = [
     password_hash TEXT    NOT NULL,
     role          TEXT    NOT NULL CHECK (role IN ('admin','staff')),
     status        TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    last_login_at TEXT,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
   );
@@ -139,6 +141,29 @@ const MIGRATIONS: string[] = [
     note            TEXT
   );
   `,
+  // 会话与登录限流（多用户改造）
+  `
+  CREATE TABLE IF NOT EXISTS lma_session (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES lma_user(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    last_seen  TEXT NOT NULL DEFAULT (datetime('now')),
+    ip         TEXT,
+    ua         TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_session_user    ON lma_session(user_id);
+  CREATE INDEX IF NOT EXISTS idx_session_expires ON lma_session(expires_at);
+
+  CREATE TABLE IF NOT EXISTS login_attempt (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT    NOT NULL,
+    ip       TEXT    NOT NULL DEFAULT '',
+    at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    ok       INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_login_attempt ON login_attempt(username, ip, at);
+  `,
   // 系统配置（业务画像/邮件模板/发送策略，JSON）
   `
   CREATE TABLE IF NOT EXISTS app_config (
@@ -150,6 +175,12 @@ const MIGRATIONS: string[] = [
   `,
 ]
 
+/** CREATE TABLE IF NOT EXISTS 不会给已存在的表加列；ALTER 前先查表结构，保证迁移幂等 */
+function ensureColumn(db: Db, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+}
+
 export function openDb(dbPath: string): Db {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true })
   const db = new DatabaseSync(dbPath)
@@ -158,6 +189,13 @@ export function openDb(dbPath: string): Db {
   db.exec('PRAGMA busy_timeout = 5000')
   db.exec('PRAGMA synchronous = NORMAL')
   for (const sql of MIGRATIONS) db.exec(sql)
+  // 给已存在的库补列（迁移幂等；新库在上面建表时已含这些列）
+  ensureColumn(db, 'lma_user', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(db, 'lma_user', 'last_login_at', 'TEXT')
+  ensureColumn(db, 'audit_log', 'ip', 'TEXT')
+  ensureColumn(db, 'audit_log', 'ua', 'TEXT')
+  ensureColumn(db, 'audit_log', 'session_id', 'TEXT')
+  ensureColumn(db, 'audit_log', 'result', "TEXT NOT NULL DEFAULT 'ok'")
   return db
 }
 
