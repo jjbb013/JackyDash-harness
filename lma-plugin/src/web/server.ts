@@ -132,7 +132,7 @@ export function startWebServer(db: Db, port: number, host = '127.0.0.1'): http.S
             catch { send(res, jsonResult(400, { error: '请求体不是合法 JSON' })); return }
           }
         }
-        const r = handleApi(db, method, url.pathname, url.searchParams, user, body, { ip, ua })
+        const r = await handleApi(db, method, url.pathname, url.searchParams, user, body, { ip, ua })
         send(res, jsonResult(r.status, r.body))
         return
       }

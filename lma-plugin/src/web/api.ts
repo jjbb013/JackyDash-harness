@@ -8,6 +8,7 @@ import { queueSnapshot, todaySentCount } from '../sendqueue.ts'
 import { audit } from '../audit.ts'
 import { isValidEmail, sqlNow } from '../util.ts'
 import type { SessionUser } from '../auth/session.ts'
+import { listUsers, createUser, updateUser } from './admin.ts'
 
 export interface ApiResponse { status: number; body: unknown }
 
@@ -156,13 +157,16 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   // 写操作
   '/api/review':       { methods: ['POST'], roles: ['admin', 'staff'] }, // 审核邮件：两角色
   '/api/unsubscribe':  { methods: ['POST'], roles: ['admin', 'staff'] }, // 退订名单维护：按决策放开给 staff
+  // 人员管理（F-AUTH-08）：仅 admin
+  '/api/users':        { methods: ['GET', 'POST'], roles: ['admin'] },
+  '/api/users/update': { methods: ['POST'],       roles: ['admin'] },
 }
 
 /** 路由一条 /api/* 请求。未登记路径返回 404；角色不符返回 403（并写审计）。 */
-export function handleApi(
+export async function handleApi(
   db: Db, method: string, pathname: string, params: URLSearchParams,
   user: SessionUser, body: Record<string, unknown>, ctx: ApiContext,
-): ApiResponse {
+): Promise<ApiResponse> {
   const route = ROUTE_ROLES[pathname]
   if (!route) return { status: 404, body: { error: '接口不存在' } }
   if (!route.methods.includes(method)) return { status: 405, body: { error: 'Method Not Allowed' } }
@@ -183,6 +187,8 @@ export function handleApi(
     case '/api/config':       return config(db)
     case '/api/review':       return review(db, user, body)
     case '/api/unsubscribe':  return unsubscribeAdd(db, user, body)
+    case '/api/users':        return method === 'GET' ? listUsers(db) : await createUser(db, user, body, ctx)
+    case '/api/users/update': return await updateUser(db, user, body, ctx)
   }
   return { status: 404, body: { error: '接口不存在' } }
 }

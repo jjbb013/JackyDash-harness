@@ -63,7 +63,7 @@ export function dashboardPage(user: PageUser): string {
 // 第三项是该 tab 所需角色（省略 = 两角色都可见）；后端仍会独立判定
 const TABS = [
   ['overview', '总览'], ['review', '审核队列'], ['suppliers', '供应商'],
-  ['queue', '发送队列'], ['unsub', '退订名单'], ['config', '配置', 'admin'],
+  ['queue', '发送队列'], ['unsub', '退订名单'], ['config', '配置', 'admin'], ['users', '人员管理', 'admin'],
 ]
 const USER = ${JSON.stringify(user)}
 const visibleTabs = () => TABS.filter((t) => !t[2] || t[2] === USER.role)
@@ -215,8 +215,73 @@ async function renderConfig() {
     '<div class="card"><b>发送策略</b><pre>' + esc(JSON.stringify(d.send_policy, null, 2)) + '</pre></div>'
 }
 
+// ---------- 人员管理（仅 admin；无自助注册，账号只能在这里创建） ----------
+async function renderUsers() {
+  const d = await api('api/users')
+  const rows = d.rows.map((u) => '<tr>'
+    + '<td>' + esc(u.username) + '</td>'
+    + '<td>' + (u.role === 'admin' ? '管理员' : '业务伙伴') + '</td>'
+    + '<td>' + (u.status === 'active' ? '<span class="tag sent">启用</span>' : '<span class="tag invalid">已禁用</span>') + '</td>'
+    + '<td>' + (u.must_change_password ? '<span class="tag approved">待改密</span>' : '—') + '</td>'
+    + '<td class="muted">' + fmt(u.last_login_at) + '</td>'
+    + '<td>' + u.sessions + '</td>'
+    + '<td style="white-space:nowrap">'
+      + (u.status === 'active'
+        ? '<button data-act="status" data-id="' + u.id + '" data-status="disabled">禁用</button>'
+        : '<button data-act="status" data-id="' + u.id + '" data-status="active">启用</button>')
+      + ' <button data-act="role" data-id="' + u.id + '" data-role="' + (u.role === 'admin' ? 'staff' : 'admin') + '">'
+      + (u.role === 'admin' ? '降为业务伙伴' : '升为管理员') + '</button>'
+      + ' <button data-act="reset" data-id="' + u.id + '">重置密码</button>'
+    + '</td></tr>').join('')
+
+  $('#view').innerHTML =
+    '<div class="card"><b>新建账号</b>'
+    + '<p class="muted">系统不提供自助注册，账号只能在这里创建。初始密码为一次性，对方首次登录必须修改。</p>'
+    + '<div class="row2"><input type="text" id="nu-name" placeholder="用户名（2~32 位字母/数字/._-）">'
+    + '<select id="nu-role"><option value="staff">业务伙伴</option><option value="admin">管理员</option></select>'
+    + '<button class="primary" data-act="create">创建</button></div>'
+    + '<div id="nu-pw"></div></div>'
+    + '<div class="card"><b>账号列表</b>'
+    + '<table style="margin-top:8px"><tr><th>用户名</th><th>角色</th><th>状态</th><th>改密</th><th>最近登录</th><th>会话</th><th>操作</th></tr>'
+    + rows + '</table></div>'
+}
+
+// 一次性密码只在此处显示一次，不写日志
+function showTempPassword(username, pw) {
+  const el = $('#nu-pw')
+  if (el) el.innerHTML = '<div class="card" style="background:#fffbeb"><b>一次性初始密码（请立即转告本人；离开本页后无法再查看）</b>'
+    + '<pre>' + esc(username) + '  ' + esc(pw) + '</pre></div>'
+}
+
+// 用事件委托，避免在 onclick 里拼字符串（也免去转义地狱）
+document.addEventListener('click', async (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('button[data-act]') : null
+  if (!btn) return
+  const act = btn.dataset.act
+  const id = Number(btn.dataset.id)
+  try {
+    if (act === 'create') {
+      const r = await post('api/users', { username: $('#nu-name').value, role: $('#nu-role').value })
+      await renderUsers()
+      showTempPassword(r.username, r.tempPassword)
+      toast('账号已创建')
+    } else if (act === 'status') {
+      await post('api/users/update', { id, action: 'set_status', status: btn.dataset.status })
+      await renderUsers(); toast('状态已更新')
+    } else if (act === 'role') {
+      await post('api/users/update', { id, action: 'set_role', role: btn.dataset.role })
+      await renderUsers(); toast('角色已更新')
+    } else if (act === 'reset') {
+      const r = await post('api/users/update', { id, action: 'reset_password' })
+      await renderUsers()
+      showTempPassword(r.username, r.tempPassword)
+      toast('已重置密码，该账号的旧会话已全部失效')
+    }
+  } catch (err) { toast(err.message, true) }
+})
+
 // ---------- 框架 ----------
-const RENDER = { overview: renderOverview, review: renderReview, suppliers: renderSuppliers, queue: renderQueue, unsub: renderUnsub, config: renderConfig }
+const RENDER = { overview: renderOverview, review: renderReview, suppliers: renderSuppliers, queue: renderQueue, unsub: renderUnsub, config: renderConfig, users: renderUsers }
 function renderTabs() {
   $('#tabs').innerHTML = visibleTabs().map(([id, label]) =>
     '<button class="' + (tab === id ? 'active' : '') + '" onclick="switchTab(\\'' + id + '\\')">' + label + '</button>').join('')

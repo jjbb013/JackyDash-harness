@@ -132,7 +132,7 @@ describe('角色强制（后端，与前端隐藏无关）', () => {
   it('未登记的 /api 路由一律 404（白名单默认拒绝）', async () => {
     const { cookie } = await login('admin1', 'admin-pass-1')
     expect((await get('/api/not-registered', cookie)).status).toBe(404)
-    expect((await get('/api/users', cookie)).status).toBe(404) // S5 尚未实现
+    expect((await get('/api/send', cookie)).status).toBe(404) // S6 尚未实现
   })
 
   it('方法不符 → 405', async () => {
@@ -179,5 +179,150 @@ describe('首次登录强制改密', () => {
       body: JSON.stringify({ old_password: 'admin-pass-1', new_password: 'short' }),
     })
     expect(r.status).toBe(400)
+  })
+})
+
+describe('人员管理（无自助注册，账号由 admin 创建）', () => {
+  it('staff 访问人员管理一律 403', async () => {
+    const { cookie } = await login('staff1', 'staff-pass-1')
+    expect((await get('/api/users', cookie)).status).toBe(403)
+  })
+
+  it('admin 可列账号（不含任何密码字段）', async () => {
+    const { cookie } = await login('admin1', 'admin-pass-1')
+    const r = await get('/api/users', cookie)
+    expect(r.status).toBe(200)
+    const body = await json(r) as { rows: Array<Record<string, unknown>> }
+    expect(body.rows.length).toBeGreaterThanOrEqual(3)
+    const keys = Object.keys(body.rows[0])
+    // 绝不能回传哈希；must_change_password 只是布尔标志，可以出现
+    expect(keys.some((k) => /hash/i.test(k))).toBe(false)
+    expect(keys).not.toContain('password')
+    expect(keys).not.toContain('password_hash')
+    expect(keys).toContain('must_change_password')
+    expect(keys).toContain('sessions')
+  })
+
+  it('创建账号 → 返回一次性临时密码；该账号首登被强制改密', async () => {
+    const admin = await login('admin1', 'admin-pass-1')
+    const r = await fetch(`${base}/api/users`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie: admin.cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'tempuser1', role: 'staff' }),
+    })
+    expect(r.status).toBe(200)
+    const created = await json(r) as { username: string; tempPassword: string }
+    expect(created.username).toBe('tempuser1')
+    expect(created.tempPassword).toMatch(/^[A-Za-z2-9]{16}$/)
+
+    // 临时密码可用于登录，且被标记为必须改密
+    const first = await login('tempuser1', created.tempPassword)
+    expect(first.status).toBe(302)
+    const me = await json(await get('/api/auth/me', first.cookie)) as { mustChangePassword: boolean }
+    expect(me.mustChangePassword).toBe(true)
+
+    // 未改密前业务 API 被 428 拦住
+    expect((await get('/api/overview', first.cookie)).status).toBe(428)
+
+    // 同一临时密码不会再出现：列表里没有任何密码字段
+    const list = await json(await get('/api/users', admin.cookie)) as { rows: Array<Record<string, unknown>> }
+    expect(JSON.stringify(list)).not.toContain(created.tempPassword)
+  })
+
+  it('重复用户名 / 非法用户名 / 非法角色被拒', async () => {
+    const { cookie } = await login('admin1', 'admin-pass-1')
+    const post = (body: unknown) => fetch(`${base}/api/users`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    expect((await post({ username: 'tempuser1', role: 'staff' })).status).toBe(409)
+    expect((await post({ username: 'a', role: 'staff' })).status).toBe(400)      // 太短
+    expect((await post({ username: 'bad name!', role: 'staff' })).status).toBe(400)
+    expect((await post({ username: 'okname', role: 'superuser' })).status).toBe(400)
+  })
+
+  it('护栏：不允许降级或禁用最后一个可用管理员', async () => {
+    const { cookie } = await login('admin1', 'admin-pass-1')
+    const upd = (body: unknown) => fetch(`${base}/api/users/update`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const adminId = (db.prepare("SELECT id FROM lma_user WHERE username = 'admin1'").get() as { id: number }).id
+
+    const demote = await upd({ id: adminId, action: 'set_role', role: 'staff' })
+    expect(demote.status).toBe(409)
+    expect(String((await json(demote)).error)).toContain('至少一个可用管理员')
+
+    const disable = await upd({ id: adminId, action: 'set_status', status: 'disabled' })
+    expect(disable.status).toBe(409)
+
+    // 角色/状态都没被改动
+    const row = db.prepare('SELECT role, status FROM lma_user WHERE id = ?').get(adminId) as { role: string; status: string }
+    expect(row.role).toBe('admin')
+    expect(row.status).toBe('active')
+  })
+
+  it('有了第二个管理员后，可以降级/禁用（并立即踢掉其会话）', async () => {
+    const { cookie } = await login('admin1', 'admin-pass-1')
+    const upd = (body: unknown) => fetch(`${base}/api/users/update`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    // 建第二个管理员
+    const created = await json(await fetch(`${base}/api/users`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'admin2', role: 'admin' }),
+    })) as { id: number }
+    const resetRes = await json(await fetch(`${base}/api/users/update`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: created.id, action: 'reset_password' }),
+    })) as { tempPassword: string }
+    const admin2Pw = resetRes.tempPassword
+    const admin2 = await login('admin2', admin2Pw)
+    expect(admin2.status).toBe(302) // 临时密码可登录
+
+    // 降级 admin2 为 staff → 放行，且其会话立刻失效
+    const demote = await upd({ id: created.id, action: 'set_role', role: 'staff' })
+    expect(demote.status).toBe(200)
+    expect((await get('/api/overview', admin2.cookie)).status).toBe(401)
+
+    // 再禁用 admin2 → 放行
+    const disable = await upd({ id: created.id, action: 'set_status', status: 'disabled' })
+    expect(disable.status).toBe(200)
+    // 用正确密码登录被禁用账号 → 403（密码错是 401，两者不能混）
+    expect((await login('admin2', admin2Pw)).status).toBe(403)
+  })
+
+  it('重置密码 → 新临时密码可用，旧会话全部失效', async () => {
+    const { cookie } = await login('admin1', 'admin-pass-1')
+    const uid = (db.prepare("SELECT id FROM lma_user WHERE username = 'staff1'").get() as { id: number }).id
+    const staff = await login('staff1', 'staff-pass-1')
+    expect((await get('/api/overview', staff.cookie)).status).toBe(200)
+
+    const r = await fetch(`${base}/api/users/update`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: uid, action: 'reset_password' }),
+    })
+    expect(r.status).toBe(200)
+    const { tempPassword } = await json(r) as { tempPassword: string }
+
+    expect((await get('/api/overview', staff.cookie)).status).toBe(401) // 旧会话已销毁
+    expect((await login('staff1', 'staff-pass-1')).status).toBe(401)    // 旧密码失效
+    expect((await login('staff1', tempPassword)).status).toBe(302)      // 新临时密码可用
+  })
+
+  it('每一次人员管理动作都写审计', async () => {
+    const actions = db.prepare("SELECT action FROM audit_log WHERE action LIKE 'user.%'").all() as Array<{ action: string }>
+    const names = actions.map((a) => a.action)
+    expect(names).toContain('user.create')
+    expect(names).toContain('user.set_role')
+    expect(names).toContain('user.set_status')
+    expect(names).toContain('user.reset_password')
   })
 })
