@@ -12,11 +12,12 @@ import {
 } from './csvpipeline.ts'
 import { parseCsv } from './csvparse.ts'
 import { matchSupplier, generateDraft } from './ai.ts'
-import { enqueue, queueSnapshot, todaySentCount } from './sendqueue.ts'
+import { exportSuppliersCsv } from './exporter.ts'
+import { requestSend, queueSnapshot, todaySentCount } from './sendqueue.ts'
 import { checkFollowups } from './followup.ts'
 import { applyResult } from './imap.ts'
 import { audit } from './audit.ts'
-import { csvLine, isValidEmail, splitMulti, sqlNow } from './util.ts'
+import { isValidEmail, splitMulti, sqlNow } from './util.ts'
 import { localTimeString, countryToTimezone } from './timezone.ts'
 import { PROJECT_KNOWLEDGE } from './knowledge.ts'
 import { requireRoleOf, agentIdentity } from './roles.ts'
@@ -204,20 +205,13 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
       async execute(args) {
         const perm = requireUser(db)
         if (!perm.ok) throw new Error(perm.error)
-        const where = ['deleted_at IS NULL']
-        const a: unknown[] = []
-        if (args.country) { where.push('country = ?'); a.push(args.country) }
-        if (args.status) { where.push('status = ?'); a.push(args.status) }
-        if (args.q) { where.push('(company_name LIKE ? OR email LIKE ? OR contact_name LIKE ? OR business LIKE ?)'); const l = `%${args.q}%`; a.push(l, l, l, l) }
-        const fields = ['company_name', 'contact_name', 'email', 'phone', 'website', 'business', 'networks', 'country', 'timezone', 'preferred_language', 'source', 'match_score', 'status', 'last_contact_at', 'created_at']
-        const rows = db.prepare(`SELECT ${fields.join(', ')} FROM supplier WHERE ${where.join(' AND ')} ORDER BY id`).all(...a) as Array<Record<string, unknown>>
-        const lines = ['\uFEFF' + fields.join(',')]
-        for (const r of rows) lines.push(csvLine(fields.map((f) => r[f])))
-        const operator = perm.operator
-        db.prepare('INSERT INTO export_log (username, filters, fields, row_count) VALUES (?, ?, ?, ?)')
-          .run(operator, JSON.stringify({ country: args.country, status: args.status, q: args.q }), JSON.stringify(fields), rows.length)
-        audit(db, operator, 'export', 'supplier', null, { rows: rows.length })
-        return `共 ${rows.length} 行。CSV 内容如下：\n\n${lines.join('\n')}`
+        const r = exportSuppliersCsv(db, {
+          country: args.country ? String(args.country) : undefined,
+          status: args.status ? String(args.status) : undefined,
+          q: args.q ? String(args.q) : undefined,
+        }, perm.operator)
+        audit(db, perm.operator, 'export', 'supplier', null, { rows: r.rows })
+        return `共 ${r.rows} 行。CSV 内容如下：\n\n${r.csv}`
       },
     }),
 
@@ -447,19 +441,12 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         const perm = requireUser(db)
         if (!perm.ok) throw new Error(perm.error)
         const id = num(args.draft_id, 0)
-        const draft = db.prepare('SELECT * FROM email_draft WHERE id = ?').get(id) as { status: string; supplier_id: number; subject: string; body: string } | undefined
-        if (!draft) throw new Error('草稿不存在')
-        if (draft.status !== 'approved') throw new Error('只有 approved 状态的草稿才能发送（F-SEND-02）')
-        // 幂等：同一草稿禁止重复入队/重复发送
-        if (queueSnapshot().some((q) => q.draftId === id)) throw new Error('该草稿已在发送队列中，请勿重复入队')
-        const alreadySent = db.prepare(`SELECT 1 FROM email_event WHERE draft_id = ? AND event_type = 'sent'`).get(id)
-        if (alreadySent) throw new Error('该草稿已发送过，禁止重复发送')
-        const supplier = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(draft.supplier_id) as
-          { id: number; email: string; timezone: string | null; status: string } | undefined
-        if (!supplier) throw new Error('供应商不存在')
-        const r = enqueue(db, draft, supplier)
-        if (!r.ok) throw new Error(r.reason)
-        audit(db, perm.operator, 'send_request', 'email_draft', id, { queued: r.queued, dueAt: r.dueAt ? new Date(r.dueAt).toISOString() : null, reason: r.reason })
+        // 守卫（状态/幂等/供应商有效性）与 Web 层共用同一份实现
+        const r = requestSend(db, id)
+        if (!r.ok) throw new Error(r.error ?? '发送失败')
+        audit(db, perm.operator, 'send_request', 'email_draft', id, {
+          queued: r.queued, dueAt: r.dueAt ? new Date(r.dueAt).toISOString() : null, reason: r.reason,
+        })
         return { queued: r.queued, dueAt: r.dueAt ? new Date(r.dueAt).toISOString() : null, reason: r.reason ?? null }
       },
     }),

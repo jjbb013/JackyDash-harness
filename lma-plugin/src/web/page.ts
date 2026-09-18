@@ -155,6 +155,7 @@ async function renderSuppliers() {
     '<select id="f-status"><option value="">全部状态</option>' + ['new','matched','drafted','approved','sent','replied','follow_up','unsubscribed','invalid'].map((s) =>
       '<option ' + (supQ.status === s ? 'selected' : '') + '>' + s + '</option>').join('') + '</select>' +
     '<button class="primary" onclick="searchSup()">筛选</button>' +
+    '<button data-act="export">导出 CSV（当前筛选）</button>' +
     '<span class="muted">共 ' + d.total + ' 条 · 第 ' + d.page + '/' + pages + ' 页</span>' +
     (d.page > 1 ? ' <button onclick="gotoPage(' + (d.page - 1) + ')">上一页</button>' : '') +
     (d.page < pages ? ' <button onclick="gotoPage(' + (d.page + 1) + ')">下一页</button>' : '') + '</div>' +
@@ -175,16 +176,26 @@ window.toggleDetail = async (id) => {
 
 // ---------- 发送队列 ----------
 async function renderQueue() {
-  const d = await api('/api/send-queue')
+  const d = await api('api/send-queue')
+  const approved = await api('api/review-queue?status=approved&size=50')
   const rows = d.pending.map((q) =>
     '<tr><td>草稿 #' + q.draftId + '</td><td>供应商 #' + q.supplierId + '</td><td>' + fmt(q.dueAtIso) + '</td><td>' + esc(q.reason || '—') + '</td></tr>').join('')
+  const waiting = approved.rows.map((r) =>
+    '<tr><td>#' + r.id + '</td><td>' + esc(r.company_name) + '</td><td>' + esc(r.subject) + '</td>' +
+    '<td style="white-space:nowrap"><button class="primary" data-act="send" data-id="' + r.id + '">发送</button></td></tr>').join('')
   const p = d.policy
   $('#view').innerHTML = '<div class="stats">' + stat(d.todaySent + ' / ' + p.dailyLimit, '今日已发 / 上限') +
     stat(p.intervalMinutes + ' 分钟', '节流间隔') + stat(p.checkWorkingHours ? (p.workStart + ':00–' + p.workEnd + ':00') : '关闭', '对方工作时段') +
-    stat(d.pending.length, '队列中') + '</div>' +
-    '<div class="card" style="margin-top:14px"><b>待发队列</b>' +
+    stat(d.pending.length, '队列中') + stat(approved.total, '已批准待发送') + '</div>' +
+    '<div class="card" style="margin-top:14px"><b>已批准待发送</b>' +
+    (waiting ? '<table style="margin-top:8px"><tr><th>草稿</th><th>公司</th><th>主题</th><th></th></tr>' + waiting + '</table>'
+             : '<p class="muted">没有已批准的草稿 —— 先到「审核队列」批准。</p>') + '</div>' +
+    '<div class="card"><b>待发队列</b>' +
     (rows ? '<table style="margin-top:8px"><tr><th>草稿</th><th>供应商</th><th>预计发送</th><th>说明</th></tr>' + rows + '</table>'
-          : '<p class="muted">队列为空。审核通过后用 lma_send 入队。</p>') + '</div>'
+          : '<p class="muted">队列为空。</p>') + '</div>' +
+    '<div class="card"><b>跟进</b>' +
+    '<p class="muted">按规则扫描 3 天未回复的已发送供应商并生成跟进草稿（默认只进审核队列，不直接发）。</p>' +
+    '<div class="row2"><button class="primary" data-act="followup">执行跟进检查</button></div></div>'
 }
 
 // ---------- 退订名单 ----------
@@ -276,6 +287,20 @@ document.addEventListener('click', async (e) => {
       await renderUsers()
       showTempPassword(r.username, r.tempPassword)
       toast('已重置密码，该账号的旧会话已全部失效')
+    } else if (act === 'send') {
+      const r = await post('api/send', { draft_id: id })
+      toast(r.queued ? '已入队，预计 ' + fmt(r.dueAt) + ' 发送' : '已排队等待条件满足' + (r.reason ? '（' + r.reason + '）' : ''))
+      await renderQueue()
+    } else if (act === 'followup') {
+      const r = await post('api/followup', {})
+      toast('扫描 ' + r.scanned + ' 家，生成 ' + r.created + ' 封跟进草稿')
+      await renderQueue()
+    } else if (act === 'export') {
+      const qs = new URLSearchParams()
+      if (supQ.country) qs.set('country', supQ.country)
+      if (supQ.status) qs.set('status', supQ.status)
+      if (supQ.q) qs.set('q', supQ.q)
+      location.href = 'api/export' + (qs.toString() ? '?' + qs.toString() : '')
     }
   } catch (err) { toast(err.message, true) }
 })

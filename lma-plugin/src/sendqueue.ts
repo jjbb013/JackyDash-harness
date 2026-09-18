@@ -52,6 +52,37 @@ export interface EnqueueResult {
   dueAt?: number
 }
 
+export interface SendRequestResult {
+  ok: boolean
+  error?: string
+  queued?: boolean
+  dueAt?: number | null
+  reason?: string | null
+}
+
+/**
+ * 把一封已批准的草稿加入发送队列。**工具层与 Web 层共用这一份守卫**，避免两处判断漂移。
+ * 守卫顺序：草稿存在 → 状态 approved → 不在队列 → 未发送过 → 供应商有效 → enqueue
+ * （退订名单 / 节流 / 每日上限 / 工作时段在 enqueue 内部再查）
+ */
+export function requestSend(db: Db, draftId: number): SendRequestResult {
+  const draft = db.prepare('SELECT id, status, supplier_id, subject, body FROM email_draft WHERE id = ?')
+    .get(draftId) as { id: number; status: string; supplier_id: number; subject: string; body: string } | undefined
+  if (!draft) return { ok: false, error: '草稿不存在' }
+  if (draft.status !== 'approved') return { ok: false, error: '只有 approved 状态的草稿才能发送（F-SEND-02）' }
+  if (queueSnapshot().some((q) => q.draftId === draft.id)) return { ok: false, error: '该草稿已在发送队列中，请勿重复入队' }
+  if (db.prepare(`SELECT 1 FROM email_event WHERE draft_id = ? AND event_type = 'sent'`).get(draft.id)) {
+    return { ok: false, error: '该草稿已发送过，禁止重复发送' }
+  }
+  const supplier = db.prepare('SELECT id, email, timezone, status FROM supplier WHERE id = ? AND deleted_at IS NULL')
+    .get(draft.supplier_id) as { id: number; email: string; timezone: string | null; status: string } | undefined
+  if (!supplier) return { ok: false, error: '供应商不存在' }
+
+  const r = enqueue(db, draft, supplier)
+  if (!r.ok) return { ok: false, error: r.reason }
+  return { ok: true, queued: r.queued, dueAt: r.dueAt ?? null, reason: r.reason ?? null }
+}
+
 export function enqueue(db: Db, draft: DraftLike, supplier: { id: number; email: string; timezone: string | null; status: string }): EnqueueResult {
   const policy = getSendPolicy(db)
 

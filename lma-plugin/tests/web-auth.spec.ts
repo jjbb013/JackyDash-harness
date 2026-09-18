@@ -29,6 +29,26 @@ async function login(username: string, password: string) {
 const get = (p: string, cookie?: string) =>
   fetch(`${base}${p}`, { redirect: 'manual', headers: cookie ? { cookie } : {} })
 
+/** 由 admin 建一个 staff 账号，走完"首登强制改密"，返回可用的会话 Cookie */
+async function makeStaff(username: string): Promise<string> {
+  const admin = await login('admin1', 'admin-pass-1')
+  const created = await json(await fetch(`${base}/api/users`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie: admin.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, role: 'staff' }),
+  })) as { tempPassword: string }
+
+  const first = await login(username, created.tempPassword)
+  const ch = await fetch(`${base}/api/auth/change-password`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie: first.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ old_password: created.tempPassword, new_password: 'staff-fixed-pass-1' }),
+  })
+  const cookie = (ch.headers.get('set-cookie') ?? '').split(';')[0]
+  if (!cookie.startsWith('lma_sid=')) throw new Error('makeStaff 失败：未拿到会话 Cookie')
+  return cookie
+}
+
 beforeAll(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lma-web-'))
   db = openDb(path.join(tmp, 'web.db'))
@@ -132,7 +152,7 @@ describe('角色强制（后端，与前端隐藏无关）', () => {
   it('未登记的 /api 路由一律 404（白名单默认拒绝）', async () => {
     const { cookie } = await login('admin1', 'admin-pass-1')
     expect((await get('/api/not-registered', cookie)).status).toBe(404)
-    expect((await get('/api/send', cookie)).status).toBe(404) // S6 尚未实现
+    expect((await get('/api/definitely-not-a-route', cookie)).status).toBe(404)
   })
 
   it('方法不符 → 405', async () => {
@@ -324,5 +344,90 @@ describe('人员管理（无自助注册，账号由 admin 创建）', () => {
     expect(names).toContain('user.set_role')
     expect(names).toContain('user.set_status')
     expect(names).toContain('user.reset_password')
+  })
+})
+
+describe('业务动作接口（发送 / 跟进 / 导出，staff 同样可用）', () => {
+  let draftId = 0
+  let staffCookie = ''
+
+  beforeAll(async () => {
+    const sid = Number(db.prepare(
+      `INSERT INTO supplier (company_name, email, country, status, source) VALUES ('Web Action Co','web-action@example.com','NL','approved','test')`,
+    ).run().lastInsertRowid)
+    draftId = Number(db.prepare(
+      `INSERT INTO email_draft (supplier_id, subject, body, language, status) VALUES (?, 'S', 'B', 'en', 'approved')`,
+    ).run(sid).lastInsertRowid)
+    staffCookie = await makeStaff('actor1')
+  })
+
+  it('staff 可以把已批准草稿入队（发送）', async () => {
+    const r = await fetch(`${base}/api/send`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie: staffCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft_id: draftId }),
+    })
+    expect(r.status).toBe(200)
+    const body = await json(r)
+    expect(body.ok).toBe(true)
+    expect(body).toHaveProperty('queued')
+
+    const audited = db.prepare("SELECT result FROM audit_log WHERE action = 'send_request' ORDER BY id DESC LIMIT 1")
+      .get() as { result: string }
+    expect(audited.result).toBe('ok')
+  })
+
+  it('重复入队 / 未批准的草稿被拒（409），并记 denied 审计', async () => {
+    const { cookie } = await login('admin1', 'admin-pass-1')
+    const again = await fetch(`${base}/api/send`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft_id: draftId }),
+    })
+    expect(again.status).toBe(409)
+
+    const sid = (db.prepare('SELECT supplier_id FROM email_draft WHERE id = ?').get(draftId) as { supplier_id: number }).supplier_id
+    const draft = Number(db.prepare(
+      `INSERT INTO email_draft (supplier_id, subject, body, language, status) VALUES (?, 'S2', 'B2', 'en', 'draft')`,
+    ).run(sid).lastInsertRowid)
+    const notApproved = await fetch(`${base}/api/send`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft_id: draft }),
+    })
+    expect(notApproved.status).toBe(409)
+
+    const denied = db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'send_denied' AND result = 'denied'")
+      .get() as { c: number }
+    expect(denied.c).toBeGreaterThanOrEqual(2)
+  })
+
+  it('导出：staff 可用，返回 text/csv + BOM + 下载头，并写 export_log', async () => {
+    const r = await get('/api/export?country=NL', staffCookie)
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toContain('text/csv')
+    expect(r.headers.get('content-disposition')).toContain('attachment')
+    // 注意：Response.text() 按规范会剥掉 BOM，所以必须看原始字节
+    const bytes = new Uint8Array(await r.arrayBuffer())
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xEF, 0xBB, 0xBF])
+    const csv = new TextDecoder().decode(bytes)
+    expect(csv).toContain('company_name')
+    expect(csv).toContain('Web Action Co')
+
+    const logged = db.prepare("SELECT COUNT(*) AS c FROM export_log WHERE username = 'actor1'").get() as { c: number }
+    expect(logged.c).toBeGreaterThanOrEqual(1)
+  })
+
+  it('跟进检查：staff 可用，返回扫描与生成计数', async () => {
+    const r = await fetch(`${base}/api/followup`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie: staffCookie, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    expect(r.status).toBe(200)
+    const body = await json(r)
+    expect(typeof body.scanned).toBe('number')
+    expect(typeof body.created).toBe('number')
+    expect(body.autoFollowup).toBe(false)
   })
 })

@@ -133,7 +133,13 @@ export function startWebServer(db: Db, port: number, host = '127.0.0.1'): http.S
           }
         }
         const r = await handleApi(db, method, url.pathname, url.searchParams, user, body, { ip, ua })
-        send(res, jsonResult(r.status, r.body))
+        send(res, {
+          status: r.status,
+          // 导出等场景直接发原文，其余按 JSON 序列化
+          body: r.contentType ? String(r.body) : JSON.stringify(r.body),
+          contentType: r.contentType ?? 'application/json; charset=utf-8',
+          headers: r.headers ?? {},
+        })
         return
       }
 

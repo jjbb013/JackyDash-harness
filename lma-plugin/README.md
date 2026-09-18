@@ -229,6 +229,23 @@ classify() 命中 → 写入 unsubscribe_list(source='reply_keyword')
 Web 层的 `/api/*` 用**路由×角色白名单**（`web/api.ts` 的 `ROUTE_ROLES`）：未登记的路径 404、
 角色不符 403 并写审计；`/unsubscribe` 是唯一匿名可达的业务端点（token 即凭证）。
 
+| 方法 | 路径 | 角色 | 说明 |
+|---|---|---|---|
+| GET | `/api/overview`、`/api/suppliers`、`/api/supplier` | admin/staff | 总览与名单 |
+| GET | `/api/review-queue` | admin/staff | 草稿队列（`?status=approved` 取"已批准待发送"） |
+| POST | `/api/review` | admin/staff | 批准 / 驳回 |
+| GET | `/api/send-queue` | admin/staff | 发送队列状态 |
+| POST | `/api/send` | admin/staff | 把已批准草稿入队（守卫与 `lma_send` 共用 `requestSend`） |
+| POST | `/api/followup` | admin/staff | 执行跟进检查（生成跟进草稿） |
+| GET | `/api/export` | admin/staff | 导出名单 CSV（`country`/`status`/`q` 筛选，带 BOM） |
+| GET | `/api/unsubscribes`、POST `/api/unsubscribe` | admin/staff | 退订名单查看 / 手工加入 |
+| GET | `/api/config` | **仅 admin** | 业务画像 / 邮件模板 / 发送策略 |
+| GET | `/api/users`、POST `/api/users`、POST `/api/users/update` | **仅 admin** | 账号列表 / 建号 / 改角色 / 禁用 / 重置密码 |
+| GET | `/api/auth/me`、POST `/api/auth/change-password` | 登录即可 | 当前用户 / 改密（首登强制） |
+| GET | `/login`、POST `/api/auth/login`、`/unsubscribe` | **匿名** | 登录页与登录；邮件退订端点 |
+
+> CSV 导入目前在网页端未提供，由 admin 通过 Agent 工具（`lma_import_preview` → `lma_import_confirm`）完成。
+
 **首个管理员（防止把自己锁死）**：库中一个用户都没有时，插件启动会创建 admin ——
 用 `LMA_ADMIN_USER` / `LMA_ADMIN_PASSWORD` 指定则直接可用；未指定则生成一次性随机密码
 **仅打印一次**并强制首登改密。库中已有用户时**绝不复写**。

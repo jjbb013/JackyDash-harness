@@ -9,8 +9,17 @@ import { audit } from '../audit.ts'
 import { isValidEmail, sqlNow } from '../util.ts'
 import type { SessionUser } from '../auth/session.ts'
 import { listUsers, createUser, updateUser } from './admin.ts'
+import { requestSend } from '../sendqueue.ts'
+import { exportSuppliersCsv } from '../exporter.ts'
+import { checkFollowups } from '../followup.ts'
 
-export interface ApiResponse { status: number; body: unknown }
+export interface ApiResponse {
+  status: number
+  body: unknown
+  /** 设置后按原样发送（如 text/csv 导出），否则按 JSON 序列化 */
+  contentType?: string
+  headers?: Record<string, string>
+}
 
 const num = (v: string | null, d: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d }
 
@@ -132,6 +141,49 @@ function unsubscribeAdd(db: Db, user: SessionUser, body: Record<string, unknown>
   return { status: 200, body: { ok: true } }
 }
 
+/** POST /api/send：把已批准草稿入队（守卫与 lma_send 共用 requestSend） */
+function send(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const draftId = num(String(body.draft_id ?? ''), 0)
+  const r = requestSend(db, draftId)
+  audit(db, user.username, r.ok ? 'send_request' : 'send_denied', 'email_draft', draftId || null, {
+    queued: r.queued, dueAt: r.dueAt ? new Date(r.dueAt).toISOString() : null, reason: r.reason, error: r.error, via: 'web',
+  }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId, result: r.ok ? 'ok' : 'denied' })
+  if (!r.ok) return { status: 409, body: { error: r.error } }
+  return {
+    status: 200,
+    body: { ok: true, queued: r.queued, dueAt: r.dueAt ? new Date(r.dueAt).toISOString() : null, reason: r.reason ?? null },
+  }
+}
+
+/** POST /api/followup：按规则扫描并生成跟进草稿（默认只进审核队列） */
+async function followup(db: Db, user: SessionUser, ctx: ApiContext): Promise<ApiResponse> {
+  const result = await checkFollowups(db, user.username)
+  audit(db, user.username, 'followup_check', 'supplier', null, { ...result, via: 'web' }, {
+    ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId,
+  })
+  return { status: 200, body: result }
+}
+
+/** GET /api/export：按筛选导出 CSV（浏览器直接下载） */
+function exportCsv(db: Db, user: SessionUser, params: URLSearchParams, ctx: ApiContext): ApiResponse {
+  const filters = {
+    country: params.get('country')?.trim() || undefined,
+    status: params.get('status')?.trim() || undefined,
+    q: params.get('q')?.trim() || undefined,
+  }
+  const r = exportSuppliersCsv(db, filters, user.username)
+  audit(db, user.username, 'export', 'supplier', null, { rows: r.rows, filters, via: 'web' }, {
+    ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId,
+  })
+  const stamp = new Date().toISOString().slice(0, 10)
+  return {
+    status: 200,
+    body: r.csv,
+    contentType: 'text/csv; charset=utf-8',
+    headers: { 'Content-Disposition': `attachment; filename="lma-suppliers-${stamp}.csv"` },
+  }
+}
+
 function config(db: Db): ApiResponse {
   return { status: 200, body: { profile: getProfile(db), email_template: getEmailTemplate(db), send_policy: getSendPolicy(db) } }
 }
@@ -157,6 +209,10 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   // 写操作
   '/api/review':       { methods: ['POST'], roles: ['admin', 'staff'] }, // 审核邮件：两角色
   '/api/unsubscribe':  { methods: ['POST'], roles: ['admin', 'staff'] }, // 退订名单维护：按决策放开给 staff
+  // 业务动作（PRD 角色表：staff 同样可用）
+  '/api/send':         { methods: ['POST'], roles: ['admin', 'staff'] }, // 发送（入队）
+  '/api/followup':     { methods: ['POST'], roles: ['admin', 'staff'] }, // 标记/执行跟进
+  '/api/export':       { methods: ['GET'],  roles: ['admin', 'staff'] }, // 导出名单
   // 人员管理（F-AUTH-08）：仅 admin
   '/api/users':        { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/users/update': { methods: ['POST'],       roles: ['admin'] },
@@ -187,6 +243,9 @@ export async function handleApi(
     case '/api/config':       return config(db)
     case '/api/review':       return review(db, user, body)
     case '/api/unsubscribe':  return unsubscribeAdd(db, user, body)
+    case '/api/send':         return send(db, user, body, ctx)
+    case '/api/followup':     return await followup(db, user, ctx)
+    case '/api/export':       return exportCsv(db, user, params, ctx)
     case '/api/users':        return method === 'GET' ? listUsers(db) : await createUser(db, user, body, ctx)
     case '/api/users/update': return await updateUser(db, user, body, ctx)
   }
