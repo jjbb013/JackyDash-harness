@@ -25,7 +25,7 @@ export function ensureBootstrapAdmin(db: Db): BootstrapResult {
   const { c } = db.prepare('SELECT COUNT(*) AS c FROM lma_user').get() as { c: number }
   if (c > 0) return { created: false, mustChange: false }
 
-  const username = (process.env.LMA_ADMIN_USER ?? 'admin').trim() || 'admin'
+  const username = (process.env.LMA_ADMIN_USER ?? 'will').trim() || 'will'
   const explicit = (process.env.LMA_ADMIN_PASSWORD ?? '').trim()
   const generated = explicit ? '' : generateTempPassword(16)
   const password = explicit || generated

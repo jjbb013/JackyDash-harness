@@ -1,5 +1,6 @@
-# LMA 插件加载补丁：pnpm dsh web --patch ./lma-plugin/cordis.yml
-# name 必须是本机绝对路径（指向 lma-plugin/src/index.ts）
+# LMA 插件加载补丁：pnpm dsh web --patch ./lma-plugin/cordis.yml --no-open
+# name 用相对路径：Harness 把插入项的相对路径锚定到**本补丁文件所在目录**解析，
+# 因此这个文件在 macOS 与 Linux 上通用（绝对路径会在另一台机器上失效，别改）。
 - insert:
     - id: lma
-      name: '/Users/will/Library/Mobile Documents/iCloud~md~obsidian/Documents/OB-Will/01-Projects/DeepSeek Harness/DeepSeek Harness/JackyDash-harness/lma-plugin/src/index.ts'
+      name: ./src/index.ts
