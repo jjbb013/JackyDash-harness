@@ -10,7 +10,9 @@ export const PROJECT_KNOWLEDGE: Record<string, string> = {
 ## 技术栈与部署约束
 - 单机 1 核 2G 公网 IP；Node 22 + SQLite（node:sqlite 内置，零原生依赖）+ 应用内调度
 - 3 人使用（1 admin + 2 staff），日均发送 10~20 封
-- 加载方式：pnpm dsh web --patch ./lma-plugin/cordis.yml
+- 加载方式：pnpm dsh web --patch ./lma-plugin/cordis.yml --no-open
+- 访问入口：单域名一道门，登录一次后聊天工作台（3080）与推广仪表盘（/lma/，3081）通用
+  （详见 topic=entry）
 
 ## 核心流程
 CSV 导入（可插拔适配器）→ 统一入库管道（映射→校验→规范化→去重→入库→日志）→ 按需 AI 匹配 → 个性化邮件生成 → 人工审核（批准/改后批准/驳回）→ 发送队列（3 分钟节流、每日上限、对方工作时段）→ IMAP 轮询（回复/退信/退订）→ 人工跟进
@@ -82,9 +84,21 @@ KPI 以回复率为准（打开率因客户端预加载虚高）。`,
 - profile：我方业务画像（Transtar 八大服务+四大优势+目标市场）
 - email_template：页脚来源声明（{source} 占位）、禁用词、主题/正文上限
 - send_policy：interval_minutes（默认 3）、daily_limit（默认 20）、check_working_hours（默认 true）、work_start/work_end（9/18）、auto_followup（默认 false）、followup_after_days（3）、followup_max（2）
-- 角色权限（PRD 三、用户角色），判定逻辑收敛在 src/roles.ts：
-  · admin（管理员，LMA_ADMINS 环境变量，逗号分隔操作者名）：导入/导出数据、配置、管理账号、维护业务画像、审核、发送、看统计
-  · staff（业务伙伴，LMA_STAFF 环境变量）：查看列表、审核邮件、发送、标记跟进、导出数据
-  · CSV 导入仅 admin；导出 admin 与 staff 均可；不在任何名单里的操作者，写操作一律拒绝
-  · 供应商增删改与退订名单维护为 admin 专属；两种角色共用同一页面，前端按角色控制按钮可见性`,
+- 角色权限（判定逻辑收敛在 src/roles.ts）：
+  · 账号唯一来源是 **lma_user 表**（无自助注册），由 admin 在网页「人员管理」创建/改角色/禁用/重置密码
+  · admin（管理员）：导入/导出数据、配置、管理账号、维护业务画像、审核、发送、看统计
+  · staff（业务伙伴）：查看列表、审核邮件、发送、标记跟进、导出数据、维护退订名单
+  · CSV 导入与 AI 端点配置仅 admin；未登记的路由一律 404、角色不符 403 + 审计
+  · Agent 工具用**固定服务身份**（LMA_AGENT_USER），工具参数里没有 operator，模型无法自封 admin`,
+
+  entry: `# 访问入口与登录（F-AUTH-05）
+- 公网只有一个入口：https://<域名>/ 打开就是**站点首页登录页**；登录后直接进聊天工作台
+  （3080），点 /lma/ 进推广仪表盘（3081）——**同一条会话，不需要第二次登录**
+- 账号由 admin 在「人员管理」里创建；首登拿到的是一次性临时密码，改密后才能进入（≥10 位）
+- 机制：反向代理（Caddy）对 /login、/api/auth/*、/lma/unsubscribe* 之外的请求先
+  forward_auth 探 /api/auth/verify，401 就跳 /login?next=<原路径>
+- 登录成功后需要把 dsh 自己的一次性 URL token 也换掉 Cookie，否则聊天台界面的请求会 401；
+  这一步由插件在服务端现取（ctx.connection.authenticatedUrl），不写进任何配置
+- 撤权：禁用账号或改角色立即生效（角色每次请求实时读库）；登录会话 7 天过期
+- 邮件退订端点必须匿名可达（收件人没有账号），不要给它加鉴权`,
 }

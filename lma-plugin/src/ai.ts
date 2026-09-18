@@ -1,6 +1,6 @@
 // AI 匹配与邮件生成（PRD 5.5）：mock 规则可离线；api 模式对接 OpenAI 兼容接口（含 DSH/DeepSeek）
 // 页脚（来源声明 + 退订链接）由服务端固定追加（F-AI-04/05、F-COMP-01）
-import type { Db, ProfileConfig, EmailTemplateConfig, AiConfig } from './db.ts'
+import type { Db, AiConfig } from './db.ts'
 import { getProfile, getEmailTemplate, getConfig } from './db.ts'
 import { hmac } from './util.ts'
 

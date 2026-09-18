@@ -89,7 +89,8 @@ pnpm --filter @lma/dsh-plugin run build:client   # tsc → lib/types，tsdown �
 | `LMA_SCRYPT_N` | `65536` | 密码哈希强度（≥16384 才生效）。2G VPS 默认值单次登录约 100~300ms |
 | `LMA_OPERATOR` | `harness-agent` | 工具未传 operator 时默认审计操作者 |
 | `LMA_BASE_URL` | `http://127.0.0.1:3081` | HTTP 退订端点域名。**仅在未配置发件地址时**作为页脚兜底（默认走回信退订，见 §五）；生产可改 HTTPS 域名反代到 `LMA_HTTP_PORT` |
-| `LMA_HTTP_PORT` | `3081` | 插件内置 Web 服务端口：`/` 仪表盘、`/unsubscribe` 退订端点、`/api/*` JSON API（绑 127.0.0.1，Node 原生 http，零依赖） |
+| `LMA_HTTP_PORT` | `3081` | 插件内置 Web 服务端口：`/` 仪表盘、`/login` 站点首页登录页、`/api/auth/verify` 反代鉴权探针、`/unsubscribe` 退订端点、`/api/*` JSON API（绑 127.0.0.1，Node 原生 http，零依赖） |
+| `LMA_CHAT_PORT` | `3080` | 聊天 UI（`dsh web`）端口。只用于**本机**把登录后的访客从 3081 送到 3080；公网部署下聊天台与登录页同源（同一个域名反代），此变量不参与 |
 | `LMA_COOKIE_SECRET` | `lma-dev-secret` | HTTP 退订 token 的 HMAC 密钥。⚠️ 默认值是开发用弱密钥，且 token 确定性、无过期机制——把 `/unsubscribe` 暴露到公网前**务必换成强随机值** |
 | `LMA_AI_MODE` | `mock` | `mock` 离线规则 / `api` 对接 OpenAI 兼容接口。**已被网页配置取代**，仅在从未保存过网页配置时作为兜底 |
 | `LMA_AI_URL` / `LMA_AI_KEY` / `LMA_AI_MODEL` | 空 / 空 / `deepseek-chat` | 同上（兜底）。**推荐直接在仪表盘「配置」里填**，存在 `app_config.ai_config` |
@@ -244,9 +245,40 @@ Web 层的 `/api/*` 用**路由×角色白名单**（`web/api.ts` 的 `ROUTE_ROL
 | GET / POST | `/api/ai-config` | **仅 admin** | AI 端点 / 模型 / API Key（**GET 永不回传 Key 明文**，只给掩码） |
 | GET | `/api/users`、POST `/api/users`、POST `/api/users/update` | **仅 admin** | 账号列表 / 建号 / 改角色 / 禁用 / 重置密码 |
 | GET | `/api/auth/me`、POST `/api/auth/change-password` | 登录即可 | 当前用户 / 改密（首登强制） |
-| GET | `/login`、POST `/api/auth/login`、`/unsubscribe` | **匿名** | 登录页与登录；邮件退订端点 |
+| GET | `/login`、POST `/api/auth/login`、`/api/auth/verify`、`/unsubscribe` | **匿名** | 站点首页登录页与登录；反代鉴权探针；邮件退订端点 |
 
-### 5.7 AI 端点与 CSV 导入
+### 5.7 站点入口：一次登录，同时进聊天工作台与仪表盘（F-AUTH-05）
+
+公网部署后访客只看到**一道门**：
+
+```
+https://<域名>/                → 未登录跳 /login；登录后是聊天工作台（3080）
+https://<域名>/lma/            → LMA 仪表盘（3081）—— 同一条会话，不再二次登录
+https://<域名>/lma/unsubscribe → 邮件退订端点（唯一匿名可达的业务端点）
+```
+
+机制分两半：
+
+- **反代侧（Caddy）**：`/login`、`/api/auth/*`、`/lma/unsubscribe*` 匿名放行，其余请求先
+  `forward_auth` 探 `/api/auth/verify`；401 时跳 `/login?next=<原路径>`。「进 3080 先登录」
+  完全由这一层实现，插件不碰 3080 的路由。
+- **插件侧**：登录成功后不能直接跳 `/` —— dsh 自己还要一次**一次性 URL token** 才会下发它的
+  会话 Cookie（否则聊天台界面的 `/api` 调用全是 401）。插件与 dsh 同进程，所以用公开服务方法
+  `ctx.connection.authenticatedUrl()` **现取**带 token 的根地址，302 过去，由 dsh 完成 token
+  交换并 303 回 `/`。实现在 `src/web/entry.ts`。
+
+几条约束：
+
+- `next` 只接受站内绝对路径（`/` 开头且不是 `//`），否则回落到聊天台入口 —— 防开放跳转
+- 落到 `/lma/...` 的 `next` 直接用会话 Cookie 进，**不**绕 token（少一次跳转）
+- `forward_auth` 刻意**不用** `copy_headers`：身份一律由后端读会话 Cookie 推导，反代不传递
+  任何"我是谁"的头部，也就没有伪造面
+- 首登未改密的会话在 `/api/auth/verify` 一律 401 → 被送到 `/login`；`/login` 对这类会话
+  **就地渲染改密表单**（而不是再跳一次），否则会和反代形成回环
+- 反代转发时会带 `X-Forwarded-Proto/Host`，插件据此推断对外地址；本机（回环地址）则按
+  `LMA_CHAT_PORT` 换端口，因此同一份代码在本机与公网都能正确交接
+
+### 5.8 AI 端点与 CSV 导入
 
 **AI 端点（F-AI-06）**：admin 在仪表盘「配置」里直接填 **模式 / 端点 / 模型 / API Key**，存进 `app_config.ai_config`。
 
@@ -301,6 +333,10 @@ LMA_DOMAIN=<你的域名> bash lma-plugin/deploy/install.sh
 ```
 
 - 单域名同域不同路径：`/` = 聊天 UI（3080），`/lma/` = LMA 仪表盘（3081）；两个端口都只绑回环，公网只经反代
+- **站点首页登录页在 `/login`**：反代对除 `/login`、`/api/auth/*`、`/lma/unsubscribe*` 之外的一切
+  先 `forward_auth` 探 `/api/auth/verify`，401 就跳登录页；登录一次之后聊天台与仪表盘共用同一条
+  会话 Cookie，**没有第二次登录**（详见 §5.7）
+- **不要再叠 Basic Auth**：会让同事登录两次。统一账号体系与 Basic Auth 二选一，别并存
 - **反代必须剥掉 `/lma/` 前缀**，且 `/lma` 缺尾斜杠要 301 补上（仪表盘用相对 URL）
 - **`/lma/unsubscribe` 绝不能套鉴权**（邮件退订链接，token 即凭证）
 - 退订主路径是**回信制**（页脚与 `List-Unsubscribe` 都是 `mailto:`），HTTP 端点只是兜底；**不要整端口暴露**（同端口还有仪表盘与写接口）

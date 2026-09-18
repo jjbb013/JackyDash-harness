@@ -4,7 +4,19 @@
 // ⚠️ 前端隐藏只是体验，真正的权限判定在 web/api.ts 的 ROUTE_ROLES（后端强制）。
 export interface PageUser { username: string; role: 'admin' | 'staff'; mustChangePassword: boolean }
 
-export function dashboardPage(user: PageUser): string {
+/** HTML 属性值转义（入口地址里带一次性 token，必须按属性上下文转义）。 */
+function escapeAttr(value: string): string {
+  return value.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c)
+}
+
+/**
+ * 渲染仪表盘页面。
+ * @param user - 当前会话用户（注入前端用于过滤 tab 与按钮；真正的权限判定在后端）。
+ * @param chatHref - 「进入聊天工作台」的地址（带一次性 token，见 web/entry.ts）。
+ * @returns 完整的仪表盘 HTML。
+ */
+export function dashboardPage(user: PageUser, chatHref = '/'): string {
   return `<!doctype html>
 <html lang="zh">
 <head>
@@ -18,6 +30,8 @@ export function dashboardPage(user: PageUser): string {
   header { display:flex; align-items:center; gap:12px; padding:12px 20px; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:10; }
   header h1 { font-size:16px; margin:0; font-weight:600; }
   header .op { margin-left:auto; display:flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+  header .op a.chat { padding:5px 12px; border:1px solid var(--line); border-radius:6px; color:var(--accent); text-decoration:none; }
+  header .op a.chat:hover { border-color:var(--accent); background:#eff6ff; }
   input, select, button, textarea { font:inherit; }
   input[type=text], input[type=number] { padding:5px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; }
   button { padding:5px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
@@ -54,7 +68,7 @@ export function dashboardPage(user: PageUser): string {
 <body>
 <header>
   <h1>LMA 物流推广智能体系统</h1>
-  <div class="op"><span id="whoami" class="muted"></span><button id="logout" type="button">退出</button></div>
+  <div class="op"><a class="chat" id="chat" href="${escapeAttr(chatHref)}">聊天工作台 ↗</a><span id="whoami" class="muted"></span><button id="logout" type="button">退出</button></div>
 </header>
 <nav id="tabs"></nav>
 <main id="view"></main>

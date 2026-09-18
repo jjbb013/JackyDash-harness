@@ -25,6 +25,7 @@ export default defineConfig({
       LMA_DB_PATH: '',
       LMA_DB_BACKUP_DIR: '',
       LMA_HTTP_PORT: '3081',
+      LMA_CHAT_PORT: '3080',
       LMA_PUBLIC_URL: '',
       LMA_COOKIE_SECURE: '',
       LMA_ADMIN_USER: 'admin',

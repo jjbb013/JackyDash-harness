@@ -1,11 +1,22 @@
-# LMA 单域名部署（Caddy 版）——自动申请/续期 Let's Encrypt 证书
+# LMA 单域名部署（Caddy 版）—— 站点首页登录页 + 自动申请/续期证书
 #
-#   聊天 UI（dsh web，3080）  → https://<域名>/
-#   LMA 仪表盘（插件，3081）   → https://<域名>/lma/
-#   邮件退订端点              → https://<域名>/lma/unsubscribe?e=…&t=…（匿名可达）
+#   站点首页登录页（插件，3081）  → https://<域名>/login          （匿名）
+#   聊天 UI（dsh web，3080）      → https://<域名>/               （登录后，共用同一会话）
+#   LMA 仪表盘（插件，3081）       → https://<域名>/lma/           （登录后，**不再二次登录**）
+#   邮件退订端点                  → https://<域名>/lma/unsubscribe?e=…&t=…（匿名可达）
 #
-# 用法：cp deploy/Caddyfile /etc/caddy/Caddyfile && systemctl reload caddy
+# 访客动线：
+#   1. 打开 https://<域名>/ → forward_auth 探 /api/auth/verify → 401 → 跳 /login?next=/
+#   2. 在首页登录页用 LMA 账号登录 → 302 到 `/?token=…`（插件用 ctx.connection 现取的
+#      dsh 一次性 token）→ dsh 下发会话 Cookie 并 303 回 / → 进入聊天工作台
+#   3. 之后点 /lma/ 直接进仪表盘 —— 同一条会话 Cookie，不再要求第二次登录
+#
+# 用法：cp deploy/Caddyfile /etc/caddy/Caddyfile && caddy validate --config /etc/caddy/Caddyfile
+#       systemctl reload caddy
 # 部署前把下面的域名换成你自己的（install.sh 会自动替换）。
+# ⚠️ 若你的服务器用 Google Trust Services（ACME + EAB，见 §部署文档），
+#    **不要整文件覆盖**，只把下面 handle / forward_auth / handle_errors 部分搬过去，
+#    保留你原有的 tls 块 —— 否则会丢掉证书配置。
 
 jackydash.will-pan.com {
 	encode zstd gzip
@@ -14,18 +25,63 @@ jackydash.will-pan.com {
 	# 少了尾斜杠时 api/xxx 会解析到根路径，导致请求打到聊天 UI 上。
 	redir /lma /lma/ permanent
 
-	# 仪表盘：handle_path 会**剥掉** /lma 前缀，插件内部看到的仍是 /
-	# 浏览器侧保留 /lma 前缀 → 反代回来正好落到插件的同名路由，闭环成立。
-	handle_path /lma/* {
+	# —— ① 匿名可达：站点首页登录页 + 登录接口 + 邮件退订端点 ——
+	# 退订链接在邮件里，收件人当然没有账号，token 即凭证，绝不能挂鉴权。
+	handle /login {
+		reverse_proxy 127.0.0.1:3081
+	}
+	handle /api/auth/* {
+		reverse_proxy 127.0.0.1:3081
+	}
+	handle /lma/unsubscribe* {
+		uri strip_prefix /lma
 		reverse_proxy 127.0.0.1:3081
 	}
 
-	# 其余全部交给聊天 UI（含流式响应，Caddy 默认已关缓冲并支持 WebSocket/SSE）
-	reverse_proxy 127.0.0.1:3080
+	# —— ② 其余一律先过 LMA 会话校验（这就是"进 3080 要先登录"的全部机制）——
+	# forward_auth 把原请求（含 Cookie）复制成一次子请求打给 /api/auth/verify：
+	# 2xx 放行，否则把响应（401）交给 handle_errors 去跳转。
+	# 刻意**不** copy_headers：身份在后端一律由会话 Cookie 推导，
+	# 反代不传递任何"我是谁"的头部，也就没有伪造面。
+	handle {
+		forward_auth 127.0.0.1:3081 {
+			uri /api/auth/verify
+		}
+
+		# 仪表盘：handle_path 剥掉 /lma 前缀，插件内部看到的仍是 /
+		handle_path /lma/* {
+			reverse_proxy 127.0.0.1:3081
+		}
+
+		# 聊天 UI（含流式响应，Caddy 默认已关缓冲并支持 WebSocket/SSE）
+		handle {
+			reverse_proxy 127.0.0.1:3080 {
+				header_up Host {upstream_hostport}
+				header_up Origin http://127.0.0.1:3080
+				header_up Referer http://127.0.0.1:3080/
+			}
+		}
+	}
+
+	# —— ③ 401 → 首页登录页；登录相关路径自身的错误原样返回（否则会自己跳自己）——
+	handle_errors {
+		@authpath path /login /api/auth/*
+		handle @authpath {
+			respond "{err.status_code} {err.status_text}" {err.status_code}
+		}
+		@unauthenticated expression {err.status_code} == 401
+		handle @unauthenticated {
+			redir /login?next={http.request.uri.path} 302
+		}
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
 }
 
 # 提示：
-# · Caddy 会自动处理 X-Forwarded-For / X-Forwarded-Proto，无需手配
+# · Caddy 会自动处理 X-Forwarded-For / X-Forwarded-Proto，无需手配；
+#   插件侧的 entry.ts 靠这两个头推断"对外的聊天台地址"。
 # · 插件侧 LMA_PUBLIC_URL 必须写成 https://<域名>/lma（含子路径），
-#   否则邮件里的退订链接会指错地方
-# · 若同时要暴露其它子域，另起一个 site block 即可
+#   否则邮件里的退订链接会指错地方。
+# · 换了 LMA 账号体系之前的 basic_auth 请删掉：现在由 /login 统一登录，
+#   两套凭据并存会让同事"登录两次"。
+# · 若同时要暴露其它子域，另起一个 site block 即可。

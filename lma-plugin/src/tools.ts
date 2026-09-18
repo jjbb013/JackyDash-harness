@@ -572,7 +572,7 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
     textTool({
       name: 'lma_project_knowledge',
       description: '查询本系统（LMA 物流推广智能体系统）的项目知识：数据模型、业务流程、合规要求、配置说明、常见操作指引。用户问"这个系统怎么用/合规要求/怎么导入"等问题时优先调用',
-      parameters: { topic: { type: 'string', description: '可选主题：import/export/match/draft/review/send/track/compliance/config/overview' } },
+      parameters: { topic: { type: 'string', description: '可选主题：import/export/match/draft/review/send/track/compliance/config/entry/overview' } },
       execute(args) {
         const topic = String(args.topic ?? '').toLowerCase()
         if (topic && PROJECT_KNOWLEDGE[topic]) return PROJECT_KNOWLEDGE[topic]

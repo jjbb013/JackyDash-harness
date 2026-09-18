@@ -1,6 +1,5 @@
 // 发信（PRD 5.7）：smtp 走 nodemailer（可选依赖，未安装时回退 log 模式）；log 模式仅记录事件
 import type { Db } from './db.ts'
-import { getEmailTemplate } from './db.ts'
 import { sqlNow } from './util.ts'
 import { buildFooter, unsubscribeToken, type SupplierLike } from './ai.ts'
 

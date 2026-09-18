@@ -23,16 +23,20 @@
   - 仅 admin：`lma_import_confirm`、`lma_config_update`、`lma_event_record`、`lma_supplier_edit`、`lma_supplier_delete`
   - admin 或 staff：`lma_review`、`lma_send`、`lma_followup_check`、`lma_export_csv`、`lma_unsubscribe_add`
   - Web 的 `/api/*` 走 `web/api.ts` 的 `ROUTE_ROLES` **白名单**：未登记 404、角色不符 403 + 审计
-  - 引导：`lma_user` 为空时启动创建 admin（`LMA_ADMIN_USER`/`LMA_ADMIN_PASSWORD`），库非空绝不复写
+  - 引导：`lma_user` 为空时启动创建默认管理员（**默认 `will`**，可用 `LMA_ADMIN_USER` 覆盖；密码取 `LMA_ADMIN_PASSWORD`，未设则生成一次性密码并强制首登改密），**库非空绝不复写**（已有实例改密用 `scripts/set-admin-password.mjs`）
   - 测试：身份用 `test-agent`；切角色用 `setAgent('staff')`，越权断言错误文本含「管理员」
-
-- **字段/数据模型**：适配 WCA 导出模板——`emails`/`contacts`/`networks` 分号多值（主邮箱取第一个，其余存 `extra_emails` JSON）、`profile` 长文本、`city` 含邮编存 `region`、`id` 存 `external_id`、`enrolled_since` 直存；`Netherlands` → `NL` → `Europe/Amsterdam`；语言默认 `en`。
-- **我方画像**：Shanghai Transtar International Freight Forwarding Co., Ltd.（2022 年成立；八大服务：清关合规/多式联运/保税智慧仓 5万㎡/集拼/项目物流/门到门/冷链与 ISO TANK/贸易咨询；优势：本土化、100+ 承运商成本、AI TMS、24/7 双语；目标市场 NL/DE/GB/US/AU/SG/FR/BE/IT/ES）。画像在 `db.ts` 默认值，可经 `lma_config_update` 覆盖。
-- **角色模型（PRD 三）**：`admin` = `LMA_ADMINS`，`staff` = `LMA_STAFF`（都是逗号分隔的操作者名单，模块加载时读取）。**判定收敛在 `src/roles.ts` 一处**，`tools.ts` 与 `web/api.ts` 共用。
-  - 仅 admin：`lma_import_confirm`（CSV 导入）、`lma_config_update`、`lma_event_record`、`lma_supplier_edit`、`lma_supplier_delete`、`lma_unsubscribe_add`
-  - admin 或 staff：`lma_review`、`lma_send`、`lma_followup_check`、`lma_export_csv`
-  - **新增有权限要求的工具必须调 `requireAdmin` / `requireUser`**（`tools.ts` 里的薄封装），并补 `harness.spec.ts` 的「角色权限」用例。测试里 admin 用 `test-admin`、staff 用 `test-staff`、越权用 `outsider`。
-  - ⚠️ 不在任何名单里的操作者（含默认的 `harness-agent`）写操作会被拒绝——**有权限要求的工具必须显式传 `operator`**。
+- **站点入口是"一道门"（F-AUTH-05）**：公网 `/login` 是首页登录页，反代对 `/login`、
+  `/api/auth/*`、`/lma/unsubscribe*` 之外的请求先 `forward_auth` 探 `/api/auth/verify`
+  （有会话 200 / 否则 401）。登录一次后聊天工作台（3080）与仪表盘（`/lma/`，3081）共用同一条
+  会话 Cookie，**没有第二次登录**。
+  - ⚠️ dsh 自己还要一次**一次性 URL token** 才下发它的会话 Cookie，否则聊天台界面的 `/api`
+    全 401。插件与 dsh 同进程，用 `ctx.connection.authenticatedUrl()` **现取**带 token 的根地址
+    交接（`src/web/entry.ts`）。**不要**把这个 token 写进配置或缓存 —— 它随进程重启变化。
+  - `next` 只接受站内绝对路径；`forward_auth` 不 `copy_headers`（身份只从会话 Cookie 推导）。
+  - 首登未改密的会话在 verify 一律 401，所以 `/login` 必须**就地**渲染改密表单，
+    再跳一次会和反代形成回环。
+  - 插件**没有**接管 3080 的路由：那是 Harness 本体的 `/`（`frontend-static` 的 fallback +
+    `connection.authorizeIndex`），改它等于改本体。
 - **共享实现（改一处即改两条路径）**：`importing.ts`（CSV 导入预览/确认，工具与网页共用）、
   `exporter.ts`（名单导出）、`sendqueue.ts#requestSend`（发送守卫）、`roles.ts`（角色判定）。
   **新增业务动作时不要在 tools.ts 和 web/api.ts 各写一份守卫**，抽到共享模块里。
@@ -50,23 +54,33 @@ src/index.ts ── openDb(迁移) + seedDefaults + 注册工具 + ctx.effect �
    │                │   (23 个 defineTool)│── imap.startImapPolling（5min，可选）
    ├── csvpipeline  │   ↓ ctx.tools      └── followup.checkFollowups（6h）
    ├── ai.ts        │
+   ├── roles.ts     └── web/server.ts ── 3081：/login 登录页 + / 仪表盘 + /api/*
    ├── mailer/sendqueue/imap/followup ─── 后台定时任务直接调用
-   └── knowledge.ts（Agent 知识源）
+   └── knowledge.ts（Agent 知识源）      web/entry.ts ── 登录后交接进 3080 聊天台
 ```
 
 ## 测试
 
-`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **106/106**。
+`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **132/132**。
 `tests/harness.spec.ts` 证明插件在 dsh 内可加载可执行（`new Context()` + `ctx.plugin(SystemPrompt)` + `ctx.plugin(ToolRuntime)` + `ctx.tools.register(buildLmaTools(db))` + `ctx.tools.execute(...)`）。
 新增工具必须在此文件登记断言；改导入管道必须跑真实 `wca_netherlands.csv` 夹具用例。
+⚠️ **vitest 不做类型检查**，仓库根的 `pnpm run typecheck` 也**不含本插件**（只覆盖 `packages/` 与 `apps/`）。
+插件有若干历史存量类型错误，所以按文件过滤看自己改过的那几个：
+
+```bash
+pnpm exec tsc --noEmit --strict --skipLibCheck --moduleResolution bundler \
+  --allowImportingTsExtensions --types node lma-plugin/src/web/server.ts 2>&1 | grep 'lma-plugin/'
+```
 
 ## 环境变量
 
-见 `README.md` §四。测试默认 `LMA_ADMINS=test-admin`、`LMA_AI_MODE=mock`、SMTP/IMAP 关闭。
+见 `README.md` §四。**测试用 `vitest.config.ts` 的 `test.env` 把所有 `LMA_*` 显式钉死**（含 `LMA_AGENT_USER=test-agent`、`LMA_AI_MODE=mock`、SMTP/IMAP 关闭、`LMA_DB_PATH=''`）——因为这些变量在模块加载时读取，宿主 shell 泄漏会污染测试（踩过两次）。
 
 ## 常见任务指引
 
 - **加一个工具**：`tools.ts` 用 `textTool({name:'lma_xxx', parameters, execute})` 追加 → `buildLmaTools` 数组里加一项 → harness.spec 加断言 → 重启插件生效。
-- **换 LLM 供应商**：`LMA_AI_URL`（OpenAI 兼容 `/chat/completions`）+ `LMA_AI_KEY` + `LMA_AI_MODEL`，`ai.ts` 的 `callLlm` 不变。
+- **换 LLM 供应商**：优先在网页「配置」里改（存 `app_config.ai_config`，任意 OpenAI 兼容端点）；环境变量 `LMA_AI_*` 仅作兜底。`ai.ts#resolveAi(db)` 是唯一解析点，`callLlm(ai, ...)` 用解析结果。
 - **加爬虫数据源**：在 `csvpipeline` 入口产出 `{columns, rows}` 复用管道（PRD 可插拔适配器）。
+- **改密 / 建号**：网页「人员管理」（仅 admin）；已有实例忘记密码时用
+  `node lma-plugin/scripts/set-admin-password.mjs --username will --password <新密码>`（纯 node，不需 tsx；`--list` 只查看）。
 - **排查**：`audit_log` 与 `import_log` 全量留痕；`email_event` 记录每封邮件的 sent/replied/bounced/unsubscribed。

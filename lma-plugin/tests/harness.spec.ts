@@ -223,10 +223,14 @@ describe('配置与知识库', () => {
     expect(ok.isError).toBe(false)
   })
 
-  it('project_knowledge 覆盖合规/导入/发送主题', async () => {
+  it('project_knowledge 覆盖合规/导入/发送/入口主题', async () => {
     const r = await call('lma_project_knowledge', { topic: 'compliance' })
     expect(r.isError).toBe(false)
     expect(String(r.value)).toMatch(/退订/)
+    // 入口主题必须说清"一次登录、两处通用"，否则 Agent 会答错访问方式
+    const entry = await call('lma_project_knowledge', { topic: 'entry' })
+    expect(String(entry.value)).toMatch(/登录页/)
+    expect(String(entry.value)).toMatch(/不需要第二次登录/)
     const ov = await call('lma_project_knowledge', {})
     expect(String(ov.value)).toContain('LMA')
   })

@@ -14,6 +14,7 @@ import { initQueueState, processDue } from './sendqueue.ts'
 import { startImapPolling } from './imap.ts'
 import { checkFollowups } from './followup.ts'
 import { startWebServer } from './web/server.ts'
+import { CHAT_PORT } from './web/entry.ts'
 import { ensureBootstrapAdmin, ensureAgentAccount } from './auth/bootstrap.ts'
 import { agentIdentitySummary } from './roles.ts'
 import { purgeExpiredSessions } from './auth/session.ts'
@@ -70,7 +71,7 @@ export function apply(ctx: Context): void {
   const agent = ensureAgentAccount(db)
   if (agent.created) console.log(`[lma] 已登记 Agent 服务账号：${agent.username}（角色 ${agent.role}）`)
   console.log(`[lma] ${agentIdentitySummary(db)}`)
-  console.log(`[lma] 运行环境：${envSummary(HTTP_PORT, 3080)}`)
+  console.log(`[lma] 运行环境：${envSummary(HTTP_PORT, CHAT_PORT)}`)
 
   // 注册全部业务工具
   const lmaTools = buildLmaTools(db)
@@ -114,10 +115,11 @@ export function apply(ctx: Context): void {
       timers.push(backupTick)
     }
 
-    // LMA Web 仪表盘 + 邮件退订端点（dsh 客户端插件经 iframe 嵌入 / 页面）
-    const webServer = startWebServer(db, HTTP_PORT)
+    // LMA Web 仪表盘 + 站点首页登录页 + 邮件退订端点 + 反代鉴权探针
+    // 传 ctx 是为了在登录成功那一刻现取聊天台的带 token 入口（见 web/entry.ts）
+    const webServer = startWebServer(db, HTTP_PORT, { ctx })
     webServer.unref?.()
-    console.log(`[lma] Web 服务已启动：http://127.0.0.1:${HTTP_PORT}/（需登录；邮件退订端点 /unsubscribe 匿名可达）`)
+    console.log(`[lma] Web 服务已启动：http://127.0.0.1:${HTTP_PORT}/（首页登录；/api/auth/verify 供反向代理鉴权；/unsubscribe 匿名可达）`)
 
     return () => {
       timers.forEach((t) => clearInterval(t))

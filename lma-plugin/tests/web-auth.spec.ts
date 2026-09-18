@@ -536,3 +536,98 @@ describe('CSV 导入与 AI 配置（仅 admin）', () => {
     expect(clearedBody.keySet).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// 站点首页登录页 + 反向代理 forward_auth 探针（F-AUTH-05）
+//
+// 部署形态：Caddy 把匿名请求放行给 /login、/api/auth/*、/unsubscribe，其余先探
+// /api/auth/verify。这里验证的是"网关依赖的那几个契约"，不是网关本身。
+//
+// 夹具自建：文件前面的用例会重置 staff1 / newbie 的密码，复用它们会让本块依赖
+// 执行顺序 —— 所以这里现造一个正常 staff 与一个首登未改密账号。
+// ---------------------------------------------------------------------------
+describe('站点首页登录页与 forward_auth 探针', () => {
+  const MUST_PW = tpw('test', 'must', 'pw')
+  let adminCookie = ''
+  let staffCookie = ''
+  let mustCookie = ''
+
+  beforeAll(async () => {
+    adminCookie = (await login('admin1', ADMIN_PW)).cookie
+    staffCookie = await makeStaff('door-staff')
+    db.prepare('INSERT INTO lma_user (username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?)')
+      .run('door-newbie', await hashPassword(MUST_PW), 'staff', 1)
+    mustCookie = (await login('door-newbie', MUST_PW)).cookie
+  })
+
+  const postLogin = (fields: Record<string, string>) =>
+    fetch(`${base}/api/auth/login`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(fields).toString(),
+    })
+
+  it('verify：无会话 401、有会话 200，且 admin 与 staff 都放行', async () => {
+    expect((await get('/api/auth/verify')).status).toBe(401)
+
+    const okAdmin = await get('/api/auth/verify', adminCookie)
+    expect(okAdmin.status).toBe(200)
+    expect(okAdmin.headers.get('x-lma-role')).toBe('admin')
+    // 探针只答放行与否，不回传任何业务数据
+    expect(await okAdmin.text()).toBe('')
+
+    const okStaff = await get('/api/auth/verify', staffCookie)
+    expect(okStaff.status).toBe(200)
+    expect(okStaff.headers.get('x-lma-role')).toBe('staff')
+  })
+
+  it('verify：首登未改密的会话 401，逼反代把人送去改密页', async () => {
+    expect((await get('/api/auth/verify', mustCookie)).status).toBe(401)
+  })
+
+  it('登录页带 next 隐藏字段，登录后回仪表盘原地址（会话 Cookie 就够）', async () => {
+    const page = await get('/login?next=%2Flma%2Freview')
+    expect(page.status).toBe(200)
+    expect(await page.text()).toContain('name="next" value="/lma/review"')
+
+    const r = await postLogin({ username: 'admin1', password: ADMIN_PW, next: '/lma/review' })
+    expect(r.status).toBe(302)
+    expect(r.headers.get('location')).toBe('/lma/review')
+  })
+
+  it('登录后默认落到聊天工作台入口（本机走 3080，反代场景同源）', async () => {
+    const r = await postLogin({ username: 'admin1', password: ADMIN_PW })
+    expect(r.status).toBe(302)
+    // 测试服务在 127.0.0.1:<随机端口> 上，聊天台按 LMA_CHAT_PORT（测试钉死 3080）换端口
+    expect(r.headers.get('location')).toBe('http://127.0.0.1:3080/')
+  })
+
+  it('next 只认站内绝对路径，挡掉开放跳转', async () => {
+    for (const evil of ['//evil.example.com/x', 'https://evil.example.com', 'javascript:alert(1)']) {
+      const r = await postLogin({ username: 'admin1', password: ADMIN_PW, next: evil })
+      expect(r.status).toBe(302)
+      expect(r.headers.get('location')).toBe('http://127.0.0.1:3080/')
+    }
+    // 失败重渲染时也不把非法 next 回填进页面
+    const bad = await get('/login?next=%2F%2Fevil.example.com')
+    expect(await bad.text()).not.toContain('evil.example.com')
+  })
+
+  it('已登录访问 /login：直接交接进工作台；首登未改密则就地改密', async () => {
+    const again = await get('/login', adminCookie)
+    expect(again.status).toBe(302)
+    expect(again.headers.get('location')).toBe('http://127.0.0.1:3080/')
+
+    const form = await get('/login', mustCookie)
+    expect(form.status).toBe(200)
+    const html = await form.text()
+    expect(html).toContain('首次登录，请设置新密码')
+    expect(html).toContain('api/auth/change-password')
+  })
+
+  it('仪表盘页头带"进入聊天工作台"，地址由服务端现取', async () => {
+    const html = await (await get('/', adminCookie)).text()
+    expect(html).toContain('聊天工作台')
+    expect(html).toContain('href="http://127.0.0.1:3080/"')
+  })
+})
