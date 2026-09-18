@@ -1,16 +1,10 @@
 // LMA 工具集：注册到 ctx.tools，由 Harness Agent 驱动完成全部业务操作
 // 设计要点：结构化返回（output.schema 对象/字符串）+ render 给模型可读文本；
 // 写操作（导入/审核/发送/退订/配置）按 PRD 角色模型区分 admin / staff。
-import fs from 'node:fs/promises'
-import path from 'node:path'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Db } from './db.ts'
 import { getProfile, getEmailTemplate, getSendPolicy } from './db.ts'
-import {
-  STANDARD_FIELDS, FIELD_LABELS, autoMapColumns, previewRows, executeImport,
-  makeBatchId, type Mapping,
-} from './csvpipeline.ts'
-import { parseCsv } from './csvparse.ts'
+import { previewImport, confirmImport, auditImport } from './importing.ts'
 import { matchSupplier, generateDraft } from './ai.ts'
 import { exportSuppliersCsv } from './exporter.ts'
 import { requestSend, queueSnapshot, todaySentCount } from './sendqueue.ts'
@@ -23,7 +17,6 @@ import { PROJECT_KNOWLEDGE } from './knowledge.ts'
 import { requireRoleOf, agentIdentity } from './roles.ts'
 
 const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
-const MAX_BYTES = 5 * 1024 * 1024
 
 // ---------- 角色与权限（PRD「三、用户角色」）----------
 // 身份**固定为服务身份**（roles.ts 的 agentIdentity），角色实时取自 lma_user 表。
@@ -34,21 +27,6 @@ function op(_args?: Record<string, unknown>): string { return agentIdentity() }
 function requireAdmin(db: Db) { return requireRoleOf(db, op(), ['admin']) }
 /** admin 或 staff：审核 / 发送 / 跟进 / 导出等业务操作 */
 function requireUser(db: Db) { return requireRoleOf(db, op(), ['admin', 'staff']) }
-
-// ---------- 上传批次暂存（内存，1 小时过期） ----------
-interface StagedBatch { rows: string[][]; columns: string[]; mapping: Mapping; fileName: string; createdAt: number }
-const batches = new Map<string, StagedBatch>()
-function stageBatch(id: string, b: StagedBatch) { batches.set(id, b) }
-function getBatch(id: string): StagedBatch | null {
-  const b = batches.get(id)
-  if (!b) return null
-  if (Date.now() - b.createdAt > 3600_000) { batches.delete(id); return null }
-  return b
-}
-setInterval(() => {
-  const now = Date.now()
-  for (const [k, v] of batches) if (now - v.createdAt > 3600_000) batches.delete(k)
-}, 600_000).unref?.()
 
 // ---------- 轻量文本工具包装 ----------
 interface ToolSpec {
@@ -119,30 +97,11 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         default_country: { type: 'string', description: '默认国家（用于缺失国家字段填充，如 NL）' },
       },
       async execute(args) {
-        const p = String(args.path ?? '')
-        let content = String(args.content ?? '')
-        if (p && !content) {
-          const buf = await fs.readFile(p)
-          if (buf.length > MAX_BYTES) throw new Error('文件超过 5MB 上限')
-          content = buf.toString('utf8')
-        }
-        if (!content.trim()) throw new Error('缺少 CSV 内容或路径')
-        const { columns, rows } = parseCsv(content, 5000)
-        if (!columns.length || !rows.length) throw new Error('CSV 为空或缺少表头')
-        const mapping = autoMapColumns(columns)
-        const { stats, preview } = previewRows(rows, mapping, db, String(args.default_country ?? ''))
-        const batchId = makeBatchId()
-        stageBatch(batchId, { rows, columns, mapping, fileName: p ? path.basename(p) : 'content.csv', createdAt: Date.now() })
-        const unmapped = STANDARD_FIELDS.filter((f) => mapping[f] === null)
-        return {
-          batch_id: batchId,
-          columns,
-          mapping: Object.fromEntries(STANDARD_FIELDS.map((f) => [f, mapping[f]])),
-          unmapped,
-          fieldLabels: FIELD_LABELS,
-          stats, preview,
-          next_step: '调用 lma_import_confirm 确认导入（需提供 batch_id、dedupe_strategy、source_note）',
-        }
+        return previewImport(db, {
+          path: args.path ? String(args.path) : undefined,
+          content: args.content ? String(args.content) : undefined,
+          defaultCountry: args.default_country ? String(args.default_country) : undefined,
+        })
       },
     }),
 
@@ -159,23 +118,13 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
       async execute(args) {
         const admin = requireAdmin(db)
         if (!admin.ok) throw new Error(admin.error)
-        const batch = getBatch(String(args.batch_id ?? ''))
-        if (!batch) throw new Error('batch_id 不存在或已过期（1 小时），请重新执行 lma_import_preview')
-        const report = executeImport(db, {
-          batchId: String(args.batch_id),
-          rows: batch.rows, mapping: batch.mapping,
+        const report = confirmImport(db, String(args.batch_id ?? ''), {
           strategy: String(args.dedupe_strategy) as 'skip' | 'update' | 'create',
           sourceNote: String(args.source_note ?? ''),
           defaultCountry: args.default_country ? String(args.default_country) : undefined,
           defaultLanguage: args.default_language ? String(args.default_language) : undefined,
-          username: admin.operator,
-        })
-        batches.delete(String(args.batch_id))
-        audit(db, admin.operator, 'import', 'import_log', null, {
-          batchId: report.batchId, totalRows: report.totalRows, successRows: report.successRows,
-          updatedRows: report.updatedRows, skippedRows: report.skippedRows, failedRows: report.failedRows,
-          failureCount: report.failures.length,
-        })
+        }, admin.operator)
+        auditImport(db, admin.operator, report)
         return { report, failures_csv_hint: '失败明细已包含在上方 report.failures 中，可按行修正后重新导入' }
       },
     }),
@@ -633,5 +582,5 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
   ]
 }
 
-// 供测试导出
-export { getBatch, stageBatch }
+// 供测试导出（批次暂存已抽到 importing.ts）
+export { getBatch, stageBatch } from './importing.ts'

@@ -91,8 +91,8 @@ pnpm --filter @lma/dsh-plugin run build:client   # tsc → lib/types，tsdown �
 | `LMA_BASE_URL` | `http://127.0.0.1:3081` | HTTP 退订端点域名。**仅在未配置发件地址时**作为页脚兜底（默认走回信退订，见 §五）；生产可改 HTTPS 域名反代到 `LMA_HTTP_PORT` |
 | `LMA_HTTP_PORT` | `3081` | 插件内置 Web 服务端口：`/` 仪表盘、`/unsubscribe` 退订端点、`/api/*` JSON API（绑 127.0.0.1，Node 原生 http，零依赖） |
 | `LMA_COOKIE_SECRET` | `lma-dev-secret` | HTTP 退订 token 的 HMAC 密钥。⚠️ 默认值是开发用弱密钥，且 token 确定性、无过期机制——把 `/unsubscribe` 暴露到公网前**务必换成强随机值** |
-| `LMA_AI_MODE` | `mock` | `mock` 离线规则 / `api` 对接 OpenAI 兼容接口 |
-| `LMA_AI_URL` / `LMA_AI_KEY` / `LMA_AI_MODEL` | 空 / 空 / `deepseek-chat` | api 模式必填（也兼容任意 OpenAI 兼容服务） |
+| `LMA_AI_MODE` | `mock` | `mock` 离线规则 / `api` 对接 OpenAI 兼容接口。**已被网页配置取代**，仅在从未保存过网页配置时作为兜底 |
+| `LMA_AI_URL` / `LMA_AI_KEY` / `LMA_AI_MODEL` | 空 / 空 / `deepseek-chat` | 同上（兜底）。**推荐直接在仪表盘「配置」里填**，存在 `app_config.ai_config` |
 | `LMA_SMTP_HOST/PORT/SECURE/USER/PASS` | 空 | 填了走真实 SMTP；不填走 log 模式（只记录事件）。⚠️ 还需装 `nodemailer`，否则会**假报成功**，详见 §五 |
 | `LMA_MAIL_FROM` | SMTP_USER | 发件人；同时作为**回信退订地址**（页脚 mailto + `List-Unsubscribe` 头） |
 | `LMA_IMAP_ENABLED/HOST/PORT/TLS/USER/PASS` | false / 空 | `LMA_IMAP_ENABLED=true` 开启每 5 分钟轮询（回复 / 退信 / **退订关键词**）。需装 `imapflow`，关键词与判定规则见 §五 |
@@ -239,12 +239,26 @@ Web 层的 `/api/*` 用**路由×角色白名单**（`web/api.ts` 的 `ROUTE_ROL
 | POST | `/api/followup` | admin/staff | 执行跟进检查（生成跟进草稿） |
 | GET | `/api/export` | admin/staff | 导出名单 CSV（`country`/`status`/`q` 筛选，带 BOM） |
 | GET | `/api/unsubscribes`、POST `/api/unsubscribe` | admin/staff | 退订名单查看 / 手工加入 |
-| GET | `/api/config` | **仅 admin** | 业务画像 / 邮件模板 / 发送策略 |
+| GET | `/api/config` | **仅 admin** | 业务画像 / 邮件模板 / 发送策略（只读展示） |
+| POST | `/api/import/preview`、`/api/import/confirm` | **仅 admin** | 网页端 CSV 导入两步（与 `lma_import_*` 共用 `importing.ts`） |
+| GET / POST | `/api/ai-config` | **仅 admin** | AI 端点 / 模型 / API Key（**GET 永不回传 Key 明文**，只给掩码） |
 | GET | `/api/users`、POST `/api/users`、POST `/api/users/update` | **仅 admin** | 账号列表 / 建号 / 改角色 / 禁用 / 重置密码 |
 | GET | `/api/auth/me`、POST `/api/auth/change-password` | 登录即可 | 当前用户 / 改密（首登强制） |
 | GET | `/login`、POST `/api/auth/login`、`/unsubscribe` | **匿名** | 登录页与登录；邮件退订端点 |
 
-> CSV 导入目前在网页端未提供，由 admin 通过 Agent 工具（`lma_import_preview` → `lma_import_confirm`）完成。
+### 5.7 AI 端点与 CSV 导入
+
+**AI 端点（F-AI-06）**：admin 在仪表盘「配置」里直接填 **模式 / 端点 / 模型 / API Key**，存进 `app_config.ai_config`。
+
+- 兼容 **DeepSeek 与任意 OpenAI 兼容端点**（代码拼 `/chat/completions`，`Authorization: Bearer <key>`）
+- **数据库优先**：保存过就以库里的为准；从未保存过才退回 `LMA_AI_*` 环境变量（向后兼容）
+- Key 的处理：`GET /api/ai-config` **永不回传明文**，只回 `keySet` 与掩码（如 `sk****00`）；
+  提交时留空 = 保持不变，传 `__clear__` = 清除（清 Key 需同时把模式切回 `mock`，否则会被"api 必须有 url+key"拦下）
+- Key 以明文存在本地 SQLite，请确保库文件权限（生产 `0600`，见 §八）
+- `mock` 模式完全离线、不调用任何外部接口，适合本地与回归测试
+
+**CSV 导入**：网页端「供应商」tab 底部有导入卡（**仅 admin 可见**）——选文件 → 预览（字段映射 / 校验统计 / 未映射列）→ 选去重策略 + 填来源备注 → 确认导入。
+与 Agent 工具共用 `importing.ts` 的同一套管道，因此**行为与审计完全一致**；合规必填的 `source_note` 在两条路径上都会被校验。
 
 **首个管理员（防止把自己锁死）**：库中一个用户都没有时，插件启动会创建 admin ——
 用 `LMA_ADMIN_USER` / `LMA_ADMIN_PASSWORD` 指定则直接可用；未指定则生成一次性随机密码
@@ -275,7 +289,7 @@ Web 层的 `/api/*` 用**路由×角色白名单**（`web/api.ts` 的 `ROUTE_ROL
 pnpm vitest run --config lma-plugin/vitest.config.ts
 ```
 
-当前 **90 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
+当前 **106 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
 
 ## 八、部署（1 核 2G 生产）
 

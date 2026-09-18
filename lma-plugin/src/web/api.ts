@@ -3,15 +3,16 @@
 // 每个路由在 ROUTE_ROLES 里显式登记「允许的方法 + 允许的角色」，**未登记即 404、角色不符即 403**
 // （白名单而非黑名单：新增端点忘了登记权限时会直接拒绝，不会默认放行）。
 import type { Db } from '../db.ts'
-import { getProfile, getEmailTemplate, getSendPolicy } from '../db.ts'
+import { getProfile, getEmailTemplate, getSendPolicy, getAiConfig, setConfig } from '../db.ts'
 import { queueSnapshot, todaySentCount } from '../sendqueue.ts'
 import { audit } from '../audit.ts'
-import { isValidEmail, sqlNow } from '../util.ts'
+import { isValidEmail, sqlNow, maskSecret } from '../util.ts'
 import type { SessionUser } from '../auth/session.ts'
 import { listUsers, createUser, updateUser } from './admin.ts'
 import { requestSend } from '../sendqueue.ts'
 import { exportSuppliersCsv } from '../exporter.ts'
 import { checkFollowups } from '../followup.ts'
+import { previewImport, confirmImport, auditImport } from '../importing.ts'
 
 export interface ApiResponse {
   status: number
@@ -184,6 +185,87 @@ function exportCsv(db: Db, user: SessionUser, params: URLSearchParams, ctx: ApiC
   }
 }
 
+/** POST /api/import/preview：解析 + 字段映射 + 校验统计（与 lma_import_preview 共用实现） */
+async function importPreview(db: Db, body: Record<string, unknown>): Promise<ApiResponse> {
+  try {
+    const r = await previewImport(db, {
+      content: body.content ? String(body.content) : undefined,
+      defaultCountry: body.default_country ? String(body.default_country) : undefined,
+    })
+    return { status: 200, body: r }
+  } catch (e) {
+    return { status: 400, body: { error: (e as Error).message } }
+  }
+}
+
+/** POST /api/import/confirm：按策略落库（与 lma_import_confirm 共用实现） */
+function importConfirm(db: Db, user: SessionUser, body: Record<string, unknown>): ApiResponse {
+  const strategy = String(body.dedupe_strategy ?? 'skip')
+  if (!['skip', 'update', 'create'].includes(strategy)) {
+    return { status: 400, body: { error: 'dedupe_strategy 必须是 skip / update / create' } }
+  }
+  try {
+    const report = confirmImport(db, String(body.batch_id ?? ''), {
+      strategy: strategy as 'skip' | 'update' | 'create',
+      sourceNote: String(body.source_note ?? ''),
+      defaultCountry: body.default_country ? String(body.default_country) : undefined,
+      defaultLanguage: body.default_language ? String(body.default_language) : undefined,
+    }, user.username)
+    auditImport(db, user.username, report)
+    return { status: 200, body: { report } }
+  } catch (e) {
+    return { status: 400, body: { error: (e as Error).message } }
+  }
+}
+
+/** GET /api/ai-config：**绝不回传 Key 明文**，只回是否已设置与掩码 */
+function aiConfigView(db: Db): ApiResponse {
+  const c = getAiConfig(db)
+  return {
+    status: 200,
+    body: {
+      mode: c.mode,
+      url: c.url,
+      model: c.model,
+      keySet: Boolean(c.key),
+      keyMasked: c.key ? maskSecret(c.key) : '',
+      envFallback: Boolean(process.env.LMA_AI_URL || process.env.LMA_AI_KEY),
+    },
+  }
+}
+
+/** POST /api/ai-config：保存端点/Key/模型。key 不传或留空=保持不变，传 __clear__=清除 */
+function saveAiConfig(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const cur = getAiConfig(db)
+  const mode = String(body.mode ?? cur.mode)
+  if (mode !== 'mock' && mode !== 'api') return { status: 400, body: { error: 'mode 必须是 mock 或 api' } }
+
+  const keyInput = body.key === undefined ? undefined : String(body.key)
+  let key = cur.key
+  if (keyInput === '__clear__') key = ''
+  else if (keyInput && keyInput.trim()) key = keyInput.trim()
+
+  const next = {
+    mode: mode as 'mock' | 'api',
+    url: String(body.url ?? cur.url).trim().replace(/\/+$/, ''),
+    model: String(body.model ?? cur.model).trim() || 'deepseek-chat',
+    key,
+  }
+  if (next.mode === 'api' && (!next.url || !next.key)) {
+    return { status: 400, body: { error: 'api 模式必须同时配置端点地址与 API Key；若只想清除 Key，请先把模式改为 mock' } }
+  }
+
+  setConfig(db, 'ai_config', next, user.username)
+  audit(db, user.username, 'ai_config_update', 'app_config', null, {
+    mode: next.mode, url: next.url, model: next.model, keyChanged: key !== cur.key,
+  }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+
+  return {
+    status: 200,
+    body: { ok: true, mode: next.mode, url: next.url, model: next.model, keySet: Boolean(next.key), keyMasked: next.key ? maskSecret(next.key) : '' },
+  }
+}
+
 function config(db: Db): ApiResponse {
   return { status: 200, body: { profile: getProfile(db), email_template: getEmailTemplate(db), send_policy: getSendPolicy(db) } }
 }
@@ -213,6 +295,10 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/send':         { methods: ['POST'], roles: ['admin', 'staff'] }, // 发送（入队）
   '/api/followup':     { methods: ['POST'], roles: ['admin', 'staff'] }, // 标记/执行跟进
   '/api/export':       { methods: ['GET'],  roles: ['admin', 'staff'] }, // 导出名单
+  // CSV 导入与 AI 配置：均为 admin 专属
+  '/api/import/preview': { methods: ['POST'], roles: ['admin'] },
+  '/api/import/confirm': { methods: ['POST'], roles: ['admin'] },
+  '/api/ai-config':      { methods: ['GET', 'POST'], roles: ['admin'] },
   // 人员管理（F-AUTH-08）：仅 admin
   '/api/users':        { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/users/update': { methods: ['POST'],       roles: ['admin'] },
@@ -246,6 +332,9 @@ export async function handleApi(
     case '/api/send':         return send(db, user, body, ctx)
     case '/api/followup':     return await followup(db, user, ctx)
     case '/api/export':       return exportCsv(db, user, params, ctx)
+    case '/api/import/preview': return await importPreview(db, body)
+    case '/api/import/confirm': return importConfirm(db, user, body)
+    case '/api/ai-config':      return method === 'GET' ? aiConfigView(db) : saveAiConfig(db, user, body, ctx)
     case '/api/users':        return method === 'GET' ? listUsers(db) : await createUser(db, user, body, ctx)
     case '/api/users/update': return await updateUser(db, user, body, ctx)
   }

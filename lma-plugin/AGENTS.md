@@ -33,6 +33,12 @@
   - admin 或 staff：`lma_review`、`lma_send`、`lma_followup_check`、`lma_export_csv`
   - **新增有权限要求的工具必须调 `requireAdmin` / `requireUser`**（`tools.ts` 里的薄封装），并补 `harness.spec.ts` 的「角色权限」用例。测试里 admin 用 `test-admin`、staff 用 `test-staff`、越权用 `outsider`。
   - ⚠️ 不在任何名单里的操作者（含默认的 `harness-agent`）写操作会被拒绝——**有权限要求的工具必须显式传 `operator`**。
+- **共享实现（改一处即改两条路径）**：`importing.ts`（CSV 导入预览/确认，工具与网页共用）、
+  `exporter.ts`（名单导出）、`sendqueue.ts#requestSend`（发送守卫）、`roles.ts`（角色判定）。
+  **新增业务动作时不要在 tools.ts 和 web/api.ts 各写一份守卫**，抽到共享模块里。
+- **AI 配置**：`app_config.ai_config`（admin 在网页「配置」里改，支持任意 OpenAI 兼容端点）。
+  `ai.ts#resolveAi(db)` 是唯一解析点：**库里有配置就完全以库为准**，从未保存过才退回 `LMA_AI_*`。
+  接口永不回传 Key 明文。
 - **数据流**：所有外部数据必须经过 `csvpipeline.ts` 的统一管道（映射→校验→规范化→去重→入库→`import_log`），禁止绕过管道直写 `supplier` 表（`lma_supplier_edit` 等白名单字段除外）。
 
 ## 架构地图
@@ -50,7 +56,7 @@ src/index.ts ── openDb(迁移) + seedDefaults + 注册工具 + ctx.effect �
 
 ## 测试
 
-`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **90/90**。
+`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **106/106**。
 `tests/harness.spec.ts` 证明插件在 dsh 内可加载可执行（`new Context()` + `ctx.plugin(SystemPrompt)` + `ctx.plugin(ToolRuntime)` + `ctx.tools.register(buildLmaTools(db))` + `ctx.tools.execute(...)`）。
 新增工具必须在此文件登记断言；改导入管道必须跑真实 `wca_netherlands.csv` 夹具用例。
 

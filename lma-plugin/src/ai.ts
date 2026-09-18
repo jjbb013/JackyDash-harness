@@ -1,13 +1,38 @@
 // AI 匹配与邮件生成（PRD 5.5）：mock 规则可离线；api 模式对接 OpenAI 兼容接口（含 DSH/DeepSeek）
 // 页脚（来源声明 + 退订链接）由服务端固定追加（F-AI-04/05、F-COMP-01）
-import type { Db, ProfileConfig, EmailTemplateConfig } from './db.ts'
-import { getProfile, getEmailTemplate } from './db.ts'
+import type { Db, ProfileConfig, EmailTemplateConfig, AiConfig } from './db.ts'
+import { getProfile, getEmailTemplate, getConfig } from './db.ts'
 import { hmac } from './util.ts'
 
-const AI_URL = process.env.LMA_AI_URL ?? process.env.AI_API_URL ?? ''
-const AI_KEY = process.env.LMA_AI_KEY ?? process.env.AI_API_KEY ?? ''
-const AI_MODEL = process.env.LMA_AI_MODEL ?? 'deepseek-chat'
-const AI_MODE = process.env.LMA_AI_MODE ?? 'mock' // mock | api
+export interface AiRuntime {
+  mode: 'mock' | 'api'
+  url: string
+  key: string
+  model: string
+}
+
+/**
+ * 解析当前生效的 AI 配置（F-AI-06）。
+ * **数据库优先**（admin 在网页端「配置」里改，存 app_config.ai_config）：
+ * 一旦保存过配置，就完全以库里的为准；从未保存过时才退回环境变量，保持向后兼容。
+ */
+export function resolveAi(db: Db): AiRuntime {
+  const saved = getConfig<Partial<AiConfig> | null>(db, 'ai_config', null)
+  if (!saved) {
+    return {
+      mode: (process.env.LMA_AI_MODE ?? 'mock') === 'api' ? 'api' : 'mock',
+      url: (process.env.LMA_AI_URL ?? process.env.AI_API_URL ?? '').replace(/\/+$/, ''),
+      key: process.env.LMA_AI_KEY ?? process.env.AI_API_KEY ?? '',
+      model: process.env.LMA_AI_MODEL ?? 'deepseek-chat',
+    }
+  }
+  return {
+    mode: saved.mode === 'api' ? 'api' : 'mock',
+    url: String(saved.url ?? '').replace(/\/+$/, ''),
+    key: String(saved.key ?? ''),
+    model: String(saved.model || 'deepseek-chat'),
+  }
+}
 
 export function unsubscribeToken(email: string): string {
   return hmac(process.env.LMA_COOKIE_SECRET ?? 'lma-dev-secret', 'unsub:' + email).slice(0, 24)
@@ -42,11 +67,11 @@ function extractJson(text: string): Record<string, unknown> | null {
   try { return JSON.parse(m[0]) as Record<string, unknown> } catch { return null }
 }
 
-async function callLlm(messages: Array<{ role: string; content: string }>, maxTokens = 1200): Promise<string> {
-  const res = await fetch(AI_URL + '/chat/completions', {
+async function callLlm(ai: AiRuntime, messages: Array<{ role: string; content: string }>, maxTokens = 1200): Promise<string> {
+  const res = await fetch(ai.url + '/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${AI_KEY}` },
-    body: JSON.stringify({ model: AI_MODEL, messages, temperature: 0.4, max_tokens: maxTokens }),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ai.key}` },
+    body: JSON.stringify({ model: ai.model, messages, temperature: 0.4, max_tokens: maxTokens }),
     signal: AbortSignal.timeout(60_000),
   })
   if (!res.ok) throw new Error(`AI 接口返回 ${res.status}`)
@@ -59,8 +84,9 @@ export async function matchSupplier(db: Db, supplier: SupplierLike): Promise<Mat
   const profile = getProfile(db)
   const business = `${supplier.business ?? ''} ${supplier.networks ?? ''} ${supplier.profile ?? ''}`.toLowerCase()
 
-  if (AI_MODE === 'api' && AI_URL && AI_KEY) {
-    const content = await callLlm([
+  const ai = resolveAi(db)
+  if (ai.mode === 'api' && ai.url && ai.key) {
+    const content = await callLlm(ai, [
       { role: 'system', content: '你是国际物流业务拓展顾问。根据"我方画像"与"对方公司资料"，输出 JSON：{"score":0-100整数,"analysis":"合作切入点分析（中文，≤150字）"}。只输出 JSON。' },
       { role: 'user', content: `我方画像：${JSON.stringify(profile)}\n对方公司：${supplier.company_name}，国家 ${supplier.country ?? '未知'}，资料：${JSON.stringify({ business: supplier.business, networks: supplier.networks, profile: supplier.profile })}` },
     ])
@@ -108,9 +134,10 @@ export async function generateDraft(db: Db, supplier: SupplierLike, match: Match
   const tpl = getEmailTemplate(db)
   const lang = supplier.preferred_language || 'en'
 
-  if (AI_MODE === 'api' && AI_URL && AI_KEY) {
+  const ai = resolveAi(db)
+  if (ai.mode === 'api' && ai.url && ai.key) {
     const banned = (tpl.bannedWords || []).join(', ')
-    const content = await callLlm([
+    const content = await callLlm(ai, [
       { role: 'system', content:
         `你是国际商务邮件撰写专家。输出 JSON：{"subject":"主题","body":"正文（纯文本，不含页脚）"}。硬性要求：
 1. 语言：${lang === 'zh' ? '中文' : '英文'}；2. subject ≤ ${tpl.subjectMax} 字符；3. body ≤ ${tpl.bodyMaxWords} 词；

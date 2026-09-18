@@ -442,3 +442,97 @@ describe('业务动作接口（发送 / 跟进 / 导出，staff 同样可用）'
     expect(body.autoFollowup).toBe(false)
   })
 })
+
+describe('CSV 导入与 AI 配置（仅 admin）', () => {
+  const postJson = (p: string, body: unknown, cookie: string) =>
+    fetch(`${base}${p}`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+  it('staff 访问导入与 AI 配置接口一律 403', async () => {
+    // 用走完"首登强制改密"的 staff，否则会先被 428 拦住（那是另一条正确行为）
+    const staffCookie = await makeStaff('staffno')
+    for (const p of ['/api/import/preview', '/api/import/confirm', '/api/ai-config']) {
+      const r = await fetch(`${base}${p}`, {
+        method: 'POST', redirect: 'manual',
+        headers: { cookie: staffCookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      expect(r.status, `${p} 应拒绝 staff`).toBe(403)
+    }
+  })
+
+  it('导入两步：预览出统计 → 确认落库 → 批次用后即弃', async () => {
+    const { cookie } = await login('admin1', ADMIN_PW)
+    const csv = 'company,emails,country\nImport Co,import-co@example.com,NL\n'
+    const prev = await postJson('/api/import/preview', { content: csv }, cookie)
+    expect(prev.status).toBe(200)
+    const p = await json(prev) as { batch_id: string; stats: { total: number; valid: number } }
+    expect(p.stats.total).toBe(1)
+    expect(p.stats.valid).toBe(1)
+
+    const conf = await postJson('/api/import/confirm', {
+      batch_id: p.batch_id, dedupe_strategy: 'skip', source_note: '单元测试夹具（非真实来源）',
+    }, cookie)
+    expect(conf.status).toBe(200)
+    const report = (await json(conf) as { report: { successRows: number } }).report
+    expect(report.successRows).toBe(1)
+    expect((db.prepare("SELECT COUNT(*) AS c FROM supplier WHERE company_name = 'Import Co'").get() as { c: number }).c).toBe(1)
+
+    // 批次用完即弃
+    const again = await postJson('/api/import/confirm', {
+      batch_id: p.batch_id, dedupe_strategy: 'skip', source_note: 'x',
+    }, cookie)
+    expect(again.status).toBe(400)
+
+    // 导入审计留痕
+    const audited = db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'import'").get() as { c: number }
+    expect(audited.c).toBeGreaterThanOrEqual(1)
+  })
+
+  it('导入缺 source_note 被拒（合规必填）', async () => {
+    const { cookie } = await login('admin1', ADMIN_PW)
+    const prev = await postJson('/api/import/preview', { content: 'company,emails\nNoSrc Co,nosrc@example.com\n' }, cookie)
+    const { batch_id } = await json(prev) as { batch_id: string }
+    const conf = await postJson('/api/import/confirm', { batch_id, dedupe_strategy: 'skip', source_note: '' }, cookie)
+    expect(conf.status).toBe(400)
+  })
+
+  it('AI 配置：默认 mock；api 模式缺 url/key 被拒；保存后不回传明文 Key', async () => {
+    const { cookie } = await login('admin1', ADMIN_PW)
+    const initial = await json(await get('/api/ai-config', cookie)) as { mode: string; keySet: boolean }
+    expect(initial.mode).toBe('mock')
+    expect(initial.keySet).toBe(false)
+
+    expect((await postJson('/api/ai-config', { mode: 'api' }, cookie)).status).toBe(400)
+
+    const secret = ['sk', 'unit', 'test', 'key', '0000'].join('-')
+    const saved = await postJson('/api/ai-config', {
+      mode: 'api', url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', key: secret,
+    }, cookie)
+    expect(saved.status).toBe(200)
+    const savedBody = await json(saved) as { keySet: boolean; keyMasked: string }
+    expect(savedBody.keySet).toBe(true)
+    expect(savedBody.keyMasked).toContain('****')
+    expect(JSON.stringify(savedBody)).not.toContain(secret)
+
+    // 读取时也绝不回传明文
+    const after = await get('/api/ai-config', cookie)
+    const text = await after.text()
+    expect(text).not.toContain(secret)
+    expect((await json(await get('/api/ai-config', cookie)) as { keySet: boolean }).keySet).toBe(true)
+
+    // api 模式下只清 Key 会被拒（必须先离开 api 模式）
+    const badClear = await postJson('/api/ai-config', { key: '__clear__' }, cookie)
+    expect(badClear.status).toBe(400)
+
+    // 显式切回 mock 并清 Key
+    const cleared = await postJson('/api/ai-config', { mode: 'mock', key: '__clear__' }, cookie)
+    expect(cleared.status).toBe(200)
+    const clearedBody = await json(cleared) as { keySet: boolean; mode: string }
+    expect(clearedBody.mode).toBe('mock')
+    expect(clearedBody.keySet).toBe(false)
+  })
+})

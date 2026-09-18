@@ -292,6 +292,23 @@ export function getEmailTemplate(db: Db): EmailTemplateConfig {
   return { ...DEFAULT_EMAIL_TEMPLATE, ...getConfig<Partial<EmailTemplateConfig>>(db, 'email_template', {}) }
 }
 
+export interface AiConfig {
+  /** mock = 离线规则；api = 调用 OpenAI 兼容端点 */
+  mode: 'mock' | 'api'
+  /** 端点根地址，如 https://api.deepseek.com/v1（代码会拼 /chat/completions） */
+  url: string
+  /** API Key（存在本地 SQLite，请确保库文件权限 0600；接口永不回传明文） */
+  key: string
+  model: string
+}
+
+export const DEFAULT_AI_CONFIG: AiConfig = { mode: 'mock', url: '', key: '', model: 'deepseek-chat' }
+
+/** AI 配置（admin 可在网页端修改；存 app_config 的 ai_config 键） */
+export function getAiConfig(db: Db): AiConfig {
+  return { ...DEFAULT_AI_CONFIG, ...getConfig<Partial<AiConfig>>(db, 'ai_config', {}) }
+}
+
 export function getSendPolicy(db: Db): SendPolicyConfig {
   return { ...DEFAULT_SEND_POLICY, ...getConfig<Partial<SendPolicyConfig>>(db, 'send_policy', {}) }
 }

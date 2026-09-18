@@ -159,7 +159,18 @@ async function renderSuppliers() {
     '<span class="muted">共 ' + d.total + ' 条 · 第 ' + d.page + '/' + pages + ' 页</span>' +
     (d.page > 1 ? ' <button onclick="gotoPage(' + (d.page - 1) + ')">上一页</button>' : '') +
     (d.page < pages ? ' <button onclick="gotoPage(' + (d.page + 1) + ')">下一页</button>' : '') + '</div>' +
-    '<table><tr><th>ID</th><th>公司</th><th>邮箱</th><th>国家</th><th>状态</th><th>匹配度</th><th></th></tr>' + rows + '</table></div>'
+    '<table><tr><th>ID</th><th>公司</th><th>邮箱</th><th>国家</th><th>状态</th><th>匹配度</th><th></th></tr>' + rows + '</table></div>' +
+    importCard()
+}
+
+// ---------- CSV 导入（仅 admin；与 Agent 工具共用同一套管道） ----------
+function importCard() {
+  if (USER.role !== 'admin') return ''
+  return '<div class="card"><b>CSV 导入（仅管理员）</b>' +
+    '<p class="muted">选择 CSV（UTF-8，≤5000 行 / 5MB，支持 WCA 导出模板）。先预览字段映射与校验统计，确认后再落库。</p>' +
+    '<div class="row2"><input type="file" id="imp-file" accept=".csv,text/csv">' +
+    '<button class="primary" data-act="imp-preview">预览</button></div>' +
+    '<div id="imp-step2"></div><div id="imp-out"></div></div>'
 }
 window.searchSup = () => { supQ = { page: 1, q: $('#f-q').value.trim(), country: $('#f-country').value.trim(), status: $('#f-status').value }; renderSuppliers() }
 window.gotoPage = (p) => { supQ.page = p; renderSuppliers() }
@@ -223,7 +234,22 @@ async function renderConfig() {
     '</p><p><b>目标市场：</b>' + esc(d.profile.targetMarkets.join(', ')) + '</p></div>' +
     '<div class="card"><b>邮件模板约束</b><p class="muted">主题 ≤ ' + d.email_template.subjectMax + ' 字符 · 正文 ≤ ' + d.email_template.bodyMaxWords +
     ' 词 · 禁用词：' + esc(d.email_template.bannedWords.join(', ')) + '</p></div>' +
-    '<div class="card"><b>发送策略</b><pre>' + esc(JSON.stringify(d.send_policy, null, 2)) + '</pre></div>'
+    '<div class="card"><b>发送策略</b><pre>' + esc(JSON.stringify(d.send_policy, null, 2)) + '</pre></div>' +
+    '<div class="card"><b>AI 端点配置</b>' +
+    '<p class="muted">支持 DeepSeek 与任意 OpenAI 兼容端点（代码会拼 /chat/completions）。mock 为离线规则，不调用任何外部接口。</p>' +
+    '<div class="row2"><select id="ai-mode"><option value="mock">mock（离线规则）</option><option value="api">api（调用端点）</option></select>' +
+    '<input type="text" id="ai-url" size="32" placeholder="https://api.deepseek.com/v1">' +
+    '<input type="text" id="ai-model" size="15" placeholder="deepseek-chat"></div>' +
+    '<div class="row2"><input type="password" id="ai-key" size="26" placeholder="API Key（留空保持不变）">' +
+    '<button class="primary" data-act="save-ai">保存</button>' +
+    '<button data-act="clear-ai-key">清除 Key</button></div>' +
+    '<div class="muted" id="ai-state"></div></div>'
+
+  const ai = await api('api/ai-config')
+  $('#ai-mode').value = ai.mode
+  $('#ai-url').value = ai.url
+  $('#ai-model').value = ai.model
+  $('#ai-state').textContent = ai.keySet ? ('当前 Key：' + ai.keyMasked) : '当前未设置 Key（api 模式必须设置）'
 }
 
 // ---------- 人员管理（仅 admin；无自助注册，账号只能在这里创建） ----------
@@ -295,6 +321,35 @@ document.addEventListener('click', async (e) => {
       const r = await post('api/followup', {})
       toast('扫描 ' + r.scanned + ' 家，生成 ' + r.created + ' 封跟进草稿')
       await renderQueue()
+    } else if (act === 'imp-preview') {
+      const f = $('#imp-file').files && $('#imp-file').files[0]
+      if (!f) { toast('请先选择 CSV 文件', true); return }
+      const text = await f.text()
+      const r = await post('api/import/preview', { content: text })
+      window.__impBatch = r.batch_id
+      $('#imp-step2').innerHTML = '<div class="row2">' +
+        '<select id="imp-strategy"><option value="skip">skip（跳过已有）</option><option value="update">update（更新已有）</option><option value="create">create（新建）</option></select>' +
+        '<input type="text" id="imp-source" size="32" placeholder="数据来源备注（合规必填）">' +
+        '<button class="primary" data-act="imp-confirm">确认导入</button></div>'
+      $('#imp-out').innerHTML = '<pre>' + esc(JSON.stringify({ stats: r.stats, mapping: r.mapping, unmapped: r.unmapped }, null, 2)) + '</pre>'
+      toast('预览完成：合法 ' + r.stats.valid + ' / 异常 ' + r.stats.invalid + ' / 重复 ' + r.stats.duplicate)
+    } else if (act === 'imp-confirm') {
+      const r = await post('api/import/confirm', {
+        batch_id: window.__impBatch, dedupe_strategy: $('#imp-strategy').value, source_note: $('#imp-source').value,
+      })
+      $('#imp-out').innerHTML = '<pre>' + esc(JSON.stringify(r.report, null, 2)) + '</pre>'
+      toast('导入完成：成功 ' + r.report.successRows + ' / 失败 ' + r.report.failedRows)
+    } else if (act === 'save-ai') {
+      const r = await post('api/ai-config', {
+        mode: $('#ai-mode').value, url: $('#ai-url').value, model: $('#ai-model').value, key: $('#ai-key').value,
+      })
+      toast('AI 配置已保存（' + r.mode + '）')
+      await renderConfig()
+    } else if (act === 'clear-ai-key') {
+      // 清 Key 必然离开 api 模式，所以一并切回 mock（否则会被"api 必须有 Key"的校验拒绝）
+      await post('api/ai-config', { mode: 'mock', key: '__clear__' })
+      toast('已清除 API Key 并切回 mock 模式')
+      await renderConfig()
     } else if (act === 'export') {
       const qs = new URLSearchParams()
       if (supQ.country) qs.set('country', supQ.country)
