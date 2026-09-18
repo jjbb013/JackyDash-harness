@@ -83,7 +83,8 @@ function toast(msg, isErr) {
 }
 async function api(path, opts = {}) {
   // 相对路径：本页可挂在 /lma/ 子路径下（反代剥前缀，浏览器保留前缀）
-  const url = String(path).replace(/^\//, '')
+  // 不要用正则 + 反斜杠：page.ts 是模板字符串，\/ 会被还原成 / 导致生成出坏 JS（曾整个仪表盘脚本语法错误）
+  const url = String(path).charAt(0) === '/' ? String(path).slice(1) : String(path)
   const r = await fetch(url, { ...opts, headers: { ...(opts.body ? {'Content-Type':'application/json'} : {}), ...(opts.headers || {}) } })
   const j = await r.json().catch(() => ({}))
   if (r.status === 401) { location.href = 'login'; throw new Error('会话已过期，请重新登录') }
