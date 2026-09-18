@@ -177,6 +177,12 @@ EOF
   ok "$ETC_DIR/lma.env 已生成（0600）。**初始管理员密码：${ADMIN_PW}**"
   warn "SMTP/IMAP 密码还是占位符：请编辑 $ETC_DIR/lma.env 填 LMA_SMTP_PASS / LMA_IMAP_PASS 后再重启"
 fi
+# 模板里全是占位符：没替换的话服务照样能起来，但发信/收信会失败
+# （而且 log 模式会把"没发出去"假报成 smtp 成功）
+if grep -qE 'PASTE_YOUR_APP_PASSWORD|you@example\.com' "$ETC_DIR/lma.env"; then
+  warn "lma.env 仍有未替换的占位符（you@example.com / PASTE_YOUR_APP_PASSWORD）—— 填好后 systemctl restart lma 才能真正发信与收信"
+fi
+
 chmod 700 "$APP_DIR/lma-plugin/deploy/lma-backup.sh" 2>/dev/null || true
 chown -R "$RUN_USER:$RUN_USER" "$APP_DIR/lma-plugin/lib" 2>/dev/null || true
 
