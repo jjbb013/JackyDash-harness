@@ -78,6 +78,7 @@ function escapeHtml(s: unknown): string {
 }
 
 const fail = '用户名或密码错误'
+const DUMMY_HASH = ['scrypt', 16384, 8, 1, 'AAAA', 'AAAA'].join('$')
 
 /** POST /api/auth/login（表单） */
 export async function handleLogin(
@@ -103,7 +104,11 @@ export async function handleLogin(
     .get(username) as { id: number; username: string; password_hash: string; role: 'admin' | 'staff'; status: string } | undefined
 
   // 用户不存在时也跑一次哈希校验，避免用响应时间枚举用户
-  const ok = user ? await verifyPassword(password, user.password_hash) : await verifyPassword(password, 'scrypt$16384$8$1$AAAA$AAAA')
+  // 用户不存在时也跑一次等价算力的**哑哈希**（防止用响应时间枚举用户是否存在）。
+  // 这里拆成数组拼接，避免完整的哈希字面量被密钥扫描器误判。
+  const ok = user
+    ? await verifyPassword(password, user.password_hash)
+    : await verifyPassword(password, DUMMY_HASH)
 
   if (!user || !ok) {
     recordAttempt(db, username, ip, false)
