@@ -1,0 +1,31 @@
+# LMA 单域名部署（Caddy 版）——自动申请/续期 Let's Encrypt 证书
+#
+#   聊天 UI（dsh web，3080）  → https://<域名>/
+#   LMA 仪表盘（插件，3081）   → https://<域名>/lma/
+#   邮件退订端点              → https://<域名>/lma/unsubscribe?e=…&t=…（匿名可达）
+#
+# 用法：cp deploy/Caddyfile /etc/caddy/Caddyfile && systemctl reload caddy
+# 部署前把下面的域名换成你自己的（install.sh 会自动替换）。
+
+jackydash.will-pan.com {
+	encode zstd gzip
+
+	# /lma（缺尾斜杠）→ 补上。仪表盘页面用的是**相对路径**，
+	# 少了尾斜杠时 api/xxx 会解析到根路径，导致请求打到聊天 UI 上。
+	redir /lma /lma/ permanent
+
+	# 仪表盘：handle_path 会**剥掉** /lma 前缀，插件内部看到的仍是 /
+	# 浏览器侧保留 /lma 前缀 → 反代回来正好落到插件的同名路由，闭环成立。
+	handle_path /lma/* {
+		reverse_proxy 127.0.0.1:3081
+	}
+
+	# 其余全部交给聊天 UI（含流式响应，Caddy 默认已关缓冲并支持 WebSocket/SSE）
+	reverse_proxy 127.0.0.1:3080
+}
+
+# 提示：
+# · Caddy 会自动处理 X-Forwarded-For / X-Forwarded-Proto，无需手配
+# · 插件侧 LMA_PUBLIC_URL 必须写成 https://<域名>/lma（含子路径），
+#   否则邮件里的退订链接会指错地方
+# · 若同时要暴露其它子域，另起一个 site block 即可

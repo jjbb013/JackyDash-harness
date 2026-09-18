@@ -1,0 +1,12 @@
+[Unit]
+Description=每日 LMA 数据库备份
+
+[Timer]
+# 每天 03:30（服务器本地时间），带随机延迟避免整点拥塞；Persistent 保证关机错过也会补跑
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=lma-backup.service
+
+[Install]
+WantedBy=timers.target

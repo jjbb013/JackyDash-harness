@@ -1,0 +1,17 @@
+[Unit]
+Description=LMA SQLite 一致性备份（VACUUM INTO）
+Documentation=https://github.com/jjbb013/JackyDash-harness
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dsh
+Group=dsh
+EnvironmentFile=/etc/dsh/lma.env
+Environment=HOME=/var/lib/dsh
+ExecStart=/opt/dsh/lma-plugin/deploy/lma-backup.sh
+# 备份脚本会写 /var/lib/dsh/backups，读 /var/lib/dsh/lma.db
+ReadWritePaths=/var/lib/dsh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

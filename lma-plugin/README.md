@@ -291,14 +291,23 @@ pnpm vitest run --config lma-plugin/vitest.config.ts
 
 当前 **106 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
 
-## 八、部署（1 核 2G 生产）
+## 八、部署（VPS）
 
-- `systemd` 托管：`ExecStart=/usr/bin/pnpm dsh web --patch /opt/harness/lma-plugin/cordis.yml`（配合 `Restart=always`）
-- 退订走**回信制**，无需把任何端口暴露到公网：页脚与 `List-Unsubscribe` 头都是 `mailto:`，IMAP 轮询按关键词自动退订
-- 只有在必须保留 HTTP 退订端点时，才用 Nginx **只反代 `/unsubscribe` 一条路径**到 `127.0.0.1:LMA_HTTP_PORT`（**不要整端口暴露**：同端口上还有仪表盘与 `/api/*` 写接口），并把 `LMA_COOKIE_SECRET` 换成强随机值
-- 上线前务必装好 `nodemailer`（发信）与 `imapflow`（收信），并在事件里确认 `mode:"smtp"` 且 `messageId` 非空
-- SQLite 每日备份（`LMA_DB_BACKUP_DIR`，备份前自动 WAL checkpoint）或 systemd timer 复制 `lma-data/lma.db`
-- 邮件走真实 SMTP 前，先用 log 模式 + 测试收件箱验证流程；`LMA_ADMINS` 配置两位业务伙伴的标识
+**一键部署与完整运维手册见 [`deploy/README.md`](deploy/README.md)**。要点：
+
+```bash
+# VPS 上以 root 执行（Debian/Ubuntu）
+LMA_DOMAIN=<你的域名> bash lma-plugin/deploy/install.sh
+```
+
+- 单域名同域不同路径：`/` = 聊天 UI（3080），`/lma/` = LMA 仪表盘（3081）；两个端口都只绑回环，公网只经反代
+- **反代必须剥掉 `/lma/` 前缀**，且 `/lma` 缺尾斜杠要 301 补上（仪表盘用相对 URL）
+- **`/lma/unsubscribe` 绝不能套鉴权**（邮件退订链接，token 即凭证）
+- 退订主路径是**回信制**（页脚与 `List-Unsubscribe` 都是 `mailto:`），HTTP 端点只是兜底；**不要整端口暴露**（同端口还有仪表盘与写接口）
+- 上线前确认 `nodemailer` / `imapflow` **真的装上了**（已在 `optionalDependencies` 声明），并在事件里核对 `mode:"smtp"` 且 `messageId` 非空
+- 备份用 `VACUUM INTO`（`deploy/lma-backup.sh` + timer）——**不要用 `cp`**：WAL 下最新提交可能只在 `-wal` 里
+- **不要跑两个实例**：发送队列/IMAP 轮询/跟进定时任务会重复发信
+- 账号与角色只在「人员管理」里维护（无自助注册）；聊天端能做什么由 `harness-agent` 这个服务账号的角色决定
 - 合规提醒：CSV 数据同样受新西兰 UEMA 2007 与 IPP 3A（2026-05-01 生效）约束，须能说清数据合法来源；正式发送前咨询当地法律顾问
 
 ## 九、二开扩展点

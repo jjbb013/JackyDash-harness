@@ -1,0 +1,45 @@
+[Unit]
+Description=LMA 物流推广智能体系统（DeepSeek Harness 插件：聊天 UI 3080 + 仪表盘 3081）
+Documentation=https://github.com/jjbb013/JackyDash-harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+WorkingDirectory=/opt/dsh
+
+# 机密与配置集中在 /etc/dsh/lma.env（0600 root:root），不要写进 unit 文件
+EnvironmentFile=/etc/dsh/lma.env
+
+# dsh 会在 $HOME 下写会话/配置；StateDirectory 会自动创建 /var/lib/dsh 并归属 User
+Environment=HOME=/var/lib/dsh
+StateDirectory=dsh
+
+ExecStart=/usr/bin/pnpm dsh web --patch ./lma-plugin/cordis.yml --no-open
+
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# 日志交给 journald（journalctl -u lma），不要再叠一层文件轮转
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lma
+
+# ---------- 加固 ----------
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# 用 strict 时需显式放开可写路径（pnpm 可能需要写 store/缓存）：
+# ProtectSystem=strict
+# ReadWritePaths=/var/lib/dsh /opt/dsh
+
+[Install]
+WantedBy=multi-user.target
