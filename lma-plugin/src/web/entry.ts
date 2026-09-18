@@ -88,6 +88,26 @@ export function loginTarget(ctx: Context | undefined, headers: Headers): (next: 
   return (next) => next !== null && /^\/lma(?:\/|$)/.test(next) ? next : chatEntryUrl(ctx, headers)
 }
 
+/**
+ * 首页登录页地址（反代未登录时把人送去的地方）。
+ *
+ * 注意这里的 `next` 取的是**原始请求路径**：`forward_auth` 会把子请求的 URI 改写成
+ * `/api/auth/verify`，同时把原 URI 放进 `X-Forwarded-Uri`，所以只能从那个头取。
+ * @param headers - 入站请求头（反代会带 X-Forwarded-Host/Proto/Uri）。
+ * @returns 绝对地址；取不到 origin 时退化为相对路径 `/login`。
+ */
+export function loginRedirectUrl(headers: Headers): string {
+  const next = sanitizeNext(first(headers['x-forwarded-uri']))
+  const origin = requestOrigin(headers)
+  const path = next === null ? '/login' : `/login?next=${encodeURIComponent(next)}`
+  return origin ? `${origin}${path}` : path
+}
+
+/** 判断是浏览器页面导航（Accept 带 text/html）还是接口调用：决定未登录时给 302 还是 401。 */
+export function wantsHtml(headers: Headers): boolean {
+  return String(first(headers.accept) ?? '').includes('text/html')
+}
+
 /** 从 `next` 查询参数里取候选落点：只接受站内绝对路径，挡掉 `//evil.com` 这类开放跳转。 */
 export function sanitizeNext(raw: string | null | undefined): string | null {
   if (raw === null || raw === undefined) return null

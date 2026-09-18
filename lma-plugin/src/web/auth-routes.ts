@@ -227,23 +227,37 @@ export async function handleLogin(
 /**
  * GET /api/auth/verify —— 反向代理 `forward_auth` 探针。
  *
- * 只回答"这个 Cookie 能不能进"，不返回任何业务数据：2xx 放行、401 让反代把访客
- * 送去登录页。首登未改密的会话一律 401，于是访客会被送到 `/login` 的改密表单
- * （那里不会再跳走，所以不会来回弹）。
+ * 只回答"这个 Cookie 能不能进"，不返回任何业务数据。反代的语义是：**2xx 放行，
+ * 其它状态码原样转给浏览器**（`forward_auth` 文档原话就是"这个响应通常是一个跳转到
+ * 登录页的重定向"）。所以这里直接给出对应形态，反代侧不需要任何 handle_response
+ * 拼装（Caddyfile 里 `handle_response` 内的 `redir` 会被当成路径匹配器，踩过）：
+ *
+ *   - 放行          → 200 空体
+ *   - 页面导航未登录 → 302 到首页登录页（带 next，登录后回得来）
+ *   - 接口调用未登录 → 401，让仪表盘的 fetch 自己处理，别把 HTML 喂给 JSON.parse
+ *
+ * 首登未改密的会话与未登录同样处理，于是访客会被送到 `/login` 的改密表单
+ * （那里不会再跳走，所以不会和反代来回弹）。
  * @param user - 由会话 Cookie 解析出的用户；无会话时为 null。
- * @returns 200 空体或 401 空体。
+ * @param options - `loginUrl`（首页登录页地址，含 next）与 `wantsHtml`（是否页面导航）。
+ * @returns 200 / 302 / 401，都是空体。
  */
-export function verifyResult(user: SessionUser | null): WebResult {
-  const ok = user !== null && !user.mustChangePassword
-  return {
-    status: ok ? 200 : 401,
-    body: '',
-    contentType: 'text/plain; charset=utf-8',
-    headers: {
-      'Cache-Control': 'no-store',
-      ...ok ? { 'X-LMA-User': encodeURIComponent(user.username), 'X-LMA-Role': user.role } : {},
-    },
+export function verifyResult(
+  user: SessionUser | null,
+  options: { loginUrl: string; wantsHtml: boolean },
+): WebResult {
+  const base = { body: '', contentType: 'text/plain; charset=utf-8', headers: { 'Cache-Control': 'no-store' } }
+  if (user !== null && !user.mustChangePassword) {
+    return {
+      ...base,
+      status: 200,
+      headers: { ...base.headers, 'X-LMA-User': encodeURIComponent(user.username), 'X-LMA-Role': user.role },
+    }
   }
+  if (options.wantsHtml) {
+    return { ...base, status: 302, headers: { ...base.headers, Location: options.loginUrl } }
+  }
+  return { ...base, status: 401 }
 }
 
 /** POST /api/auth/logout */

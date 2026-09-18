@@ -96,7 +96,8 @@ KPI 以回复率为准（打开率因客户端预加载虚高）。`,
   （3080），点 /lma/ 进推广仪表盘（3081）——**同一条会话，不需要第二次登录**
 - 账号由 admin 在「人员管理」里创建；首登拿到的是一次性临时密码，改密后才能进入（≥10 位）
 - 机制：反向代理（Caddy）对 /login、/api/auth/*、/lma/unsubscribe* 之外的请求先
-  forward_auth 探 /api/auth/verify，401 就跳 /login?next=<原路径>
+  forward_auth 探 /api/auth/verify：放行回 200；页面导航未登录回 302 到
+  /login?next=<原路径>（反代原样转给浏览器）；接口调用未登录回 401，交给前端处理
 - 登录成功后需要把 dsh 自己的一次性 URL token 也换掉 Cookie，否则聊天台界面的请求会 401；
   这一步由插件在服务端现取（ctx.connection.authenticatedUrl），不写进任何配置
 - 撤权：禁用账号或改角色立即生效（角色每次请求实时读库）；登录会话 7 天过期

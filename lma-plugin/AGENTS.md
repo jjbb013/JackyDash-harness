@@ -26,14 +26,19 @@
   - 引导：`lma_user` 为空时启动创建默认管理员（**默认 `will`**，可用 `LMA_ADMIN_USER` 覆盖；密码取 `LMA_ADMIN_PASSWORD`，未设则生成一次性密码并强制首登改密），**库非空绝不复写**（已有实例改密用 `scripts/set-admin-password.mjs`）
   - 测试：身份用 `test-agent`；切角色用 `setAgent('staff')`，越权断言错误文本含「管理员」
 - **站点入口是"一道门"（F-AUTH-05）**：公网 `/login` 是首页登录页，反代对 `/login`、
-  `/api/auth/*`、`/lma/unsubscribe*` 之外的请求先 `forward_auth` 探 `/api/auth/verify`
-  （有会话 200 / 否则 401）。登录一次后聊天工作台（3080）与仪表盘（`/lma/`，3081）共用同一条
-  会话 Cookie，**没有第二次登录**。
+  `/api/auth/*`、`/lma/unsubscribe*` 之外的请求先 `forward_auth` 探 `/api/auth/verify`：
+  放行 200；页面导航未登录回 `302 → /login?next=…`；接口调用未登录回 401。登录一次后聊天
+  工作台（3080）与仪表盘（`/lma/`，3081）共用同一条会话 Cookie，**没有第二次登录**。
+  - ⚠️ `forward_auth` 只把 **2xx** 当放行，其余状态码**原样转给浏览器**，所以"跳登录页"
+    必须是 verify 自己返回的 302。**不要在 Caddyfile 的 `handle_response` 里写 `redir`** ——
+    适配器会把以 `/` 开头的第一个参数当**路径匹配器**（`redir /login?next=… 302` 会变成
+    "匹配 `/login?next=…`、跳转到 `302`"），配出来能 validate 通过但行为完全不对。
   - ⚠️ dsh 自己还要一次**一次性 URL token** 才下发它的会话 Cookie，否则聊天台界面的 `/api`
     全 401。插件与 dsh 同进程，用 `ctx.connection.authenticatedUrl()` **现取**带 token 的根地址
     交接（`src/web/entry.ts`）。**不要**把这个 token 写进配置或缓存 —— 它随进程重启变化。
-  - `next` 只接受站内绝对路径；`forward_auth` 不 `copy_headers`（身份只从会话 Cookie 推导）。
-  - 首登未改密的会话在 verify 一律 401，所以 `/login` 必须**就地**渲染改密表单，
+  - `next` 只接受站内绝对路径，原路径读 `X-Forwarded-Uri`（子请求 URI 已被改写成
+    `/api/auth/verify`）；`forward_auth` 不 `copy_headers`（身份只从会话 Cookie 推导）。
+  - 首登未改密的会话同样不放行，所以 `/login` 必须**就地**渲染改密表单，
     再跳一次会和反代形成回环。
   - 插件**没有**接管 3080 的路由：那是 Harness 本体的 `/`（`frontend-static` 的 fallback +
     `connection.authorizeIndex`），改它等于改本体。
@@ -61,7 +66,7 @@ src/index.ts ── openDb(迁移) + seedDefaults + 注册工具 + ctx.effect �
 
 ## 测试
 
-`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **132/132**。
+`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **133/133**。
 `tests/harness.spec.ts` 证明插件在 dsh 内可加载可执行（`new Context()` + `ctx.plugin(SystemPrompt)` + `ctx.plugin(ToolRuntime)` + `ctx.tools.register(buildLmaTools(db))` + `ctx.tools.execute(...)`）。
 新增工具必须在此文件登记断言；改导入管道必须跑真实 `wca_netherlands.csv` 夹具用例。
 ⚠️ **vitest 不做类型检查**，仓库根的 `pnpm run typecheck` 也**不含本插件**（只覆盖 `packages/` 与 `apps/`）。

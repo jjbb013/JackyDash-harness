@@ -260,21 +260,28 @@ https://<域名>/lma/unsubscribe → 邮件退订端点（唯一匿名可达的�
 机制分两半：
 
 - **反代侧（Caddy）**：`/login`、`/api/auth/*`、`/lma/unsubscribe*` 匿名放行，其余请求先
-  `forward_auth` 探 `/api/auth/verify`；401 时跳 `/login?next=<原路径>`。「进 3080 先登录」
-  完全由这一层实现，插件不碰 3080 的路由。
-- **插件侧**：登录成功后不能直接跳 `/` —— dsh 自己还要一次**一次性 URL token** 才会下发它的
-  会话 Cookie（否则聊天台界面的 `/api` 调用全是 401）。插件与 dsh 同进程，所以用公开服务方法
-  `ctx.connection.authenticatedUrl()` **现取**带 token 的根地址，302 过去，由 dsh 完成 token
-  交换并 303 回 `/`。实现在 `src/web/entry.ts`。
+  `forward_auth` 探 `/api/auth/verify`。「进 3080 先登录」完全由这一层实现，插件不碰 3080 的路由。
+- **插件侧**：`/api/auth/verify` 只答"能不能进"——放行 200；**页面导航**未登录时直接回
+  `302 Location: <origin>/login?next=<原路径>`（`forward_auth` 会把非 2xx 原样转给浏览器，
+  这正是它的文档推荐的形态）；**接口调用**（`Accept` 不带 `text/html`）未登录时回 401，
+  免得多一次跳转、把登录页 HTML 喂给 `response.json()`。所以 Caddyfile 里**不需要**
+  `handle_response` 拼装 —— 在 `handle_response` 里写 `redir` 会被适配器当成路径匹配器
+  （踩过：`redir /login?next=… 302` 被解析成"匹配 `/login?next=…`，跳转到 `302`"）。
+- **插件侧（交接）**：登录成功后不能直接跳 `/` —— dsh 自己还要一次**一次性 URL token** 才会
+  下发它的会话 Cookie（否则聊天台界面的 `/api` 调用全是 401）。插件与 dsh 同进程，所以用公开
+  服务方法 `ctx.connection.authenticatedUrl()` **现取**带 token 的根地址，302 过去，由 dsh 完成
+  token 交换并 303 回 `/`。实现在 `src/web/entry.ts`。
 
 几条约束：
 
-- `next` 只接受站内绝对路径（`/` 开头且不是 `//`），否则回落到聊天台入口 —— 防开放跳转
+- `next` 只接受站内绝对路径（`/` 开头且不是 `//`），否则回落到聊天台入口 —— 防开放跳转；
+  原路径取自 `X-Forwarded-Uri`（`forward_auth` 会把子请求 URI 改写成 `/api/auth/verify`，
+  原始 URI 只在这个头里）
 - 落到 `/lma/...` 的 `next` 直接用会话 Cookie 进，**不**绕 token（少一次跳转）
 - `forward_auth` 刻意**不用** `copy_headers`：身份一律由后端读会话 Cookie 推导，反代不传递
   任何"我是谁"的头部，也就没有伪造面
-- 首登未改密的会话在 `/api/auth/verify` 一律 401 → 被送到 `/login`；`/login` 对这类会话
-  **就地渲染改密表单**（而不是再跳一次），否则会和反代形成回环
+- 首登未改密的会话同样不放行 → 被送到 `/login`；`/login` 对这类会话**就地渲染改密表单**
+  （而不是再跳一次），否则会和反代形成回环
 - 反代转发时会带 `X-Forwarded-Proto/Host`，插件据此推断对外地址；本机（回环地址）则按
   `LMA_CHAT_PORT` 换端口，因此同一份代码在本机与公网都能正确交接
 

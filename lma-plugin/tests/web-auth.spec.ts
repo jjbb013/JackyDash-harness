@@ -567,9 +567,25 @@ describe('站点首页登录页与 forward_auth 探针', () => {
       body: new URLSearchParams(fields).toString(),
     })
 
-  it('verify：无会话 401、有会话 200，且 admin 与 staff 都放行', async () => {
+  it('verify：接口调用未登录 → 401；页面导航未登录 → 302 回登录页', async () => {
+    // fetch 默认 Accept 是通配符 —— 对应仪表盘里的 XHR，必须是 401 而不是 302
     expect((await get('/api/auth/verify')).status).toBe(401)
 
+    // 浏览器点链接导航时 Accept 带 text/html —— 反代直接把 302 转给浏览器
+    const nav = await fetch(`${base}/api/auth/verify`, {
+      redirect: 'manual',
+      headers: {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'lma.example.com',
+        'x-forwarded-uri': '/lma/review',
+      },
+    })
+    expect(nav.status).toBe(302)
+    expect(nav.headers.get('location')).toBe('https://lma.example.com/login?next=%2Flma%2Freview')
+  })
+
+  it('verify：无会话 401/302、有会话 200，且 admin 与 staff 都放行', async () => {
     const okAdmin = await get('/api/auth/verify', adminCookie)
     expect(okAdmin.status).toBe(200)
     expect(okAdmin.headers.get('x-lma-role')).toBe('admin')
@@ -581,8 +597,15 @@ describe('站点首页登录页与 forward_auth 探针', () => {
     expect(okStaff.headers.get('x-lma-role')).toBe('staff')
   })
 
-  it('verify：首登未改密的会话 401，逼反代把人送去改密页', async () => {
+  it('verify：首登未改密的会话不放行，逼反代把人送去改密页', async () => {
     expect((await get('/api/auth/verify', mustCookie)).status).toBe(401)
+    const nav = await fetch(`${base}/api/auth/verify`, {
+      redirect: 'manual',
+      headers: { cookie: mustCookie, accept: 'text/html' },
+    })
+    expect(nav.status).toBe(302)
+    // 没有 X-Forwarded-Uri 时 next 缺省；origin 从 Host 推断（fetch 自己带 Host）
+    expect(nav.headers.get('location')).toBe(`${base}/login`)
   })
 
   it('登录页带 next 隐藏字段，登录后回仪表盘原地址（会话 Cookie 就够）', async () => {

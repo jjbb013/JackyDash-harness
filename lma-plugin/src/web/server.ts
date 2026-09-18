@@ -29,7 +29,7 @@ import {
   loginPage, changePasswordPage, handleLogin, handleLogout, handleChangePassword, meResult, verifyResult,
   htmlResult, jsonResult, redirectResult, type WebResult,
 } from './auth-routes.ts'
-import { chatEntryUrl, loginTarget, sanitizeNext } from './entry.ts'
+import { chatEntryUrl, loginRedirectUrl, loginTarget, sanitizeNext, wantsHtml } from './entry.ts'
 import { clientIp } from '../audit.ts'
 
 const MAX_BODY = 1024 * 1024
@@ -115,7 +115,7 @@ export function startWebServer(db: Db, port: number, options: WebServerOptions =
 
       // 3) 反向代理的 forward_auth 探针：匿名可达，但只答"能不能进"
       if (url.pathname === '/api/auth/verify') {
-        send(res, verifyResult(user))
+        send(res, verifyResult(user, { loginUrl: loginRedirectUrl(headers), wantsHtml: wantsHtml(headers) }))
         return
       }
 
