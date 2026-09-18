@@ -19,22 +19,20 @@ import { audit } from './audit.ts'
 import { csvLine, isValidEmail, splitMulti, sqlNow } from './util.ts'
 import { localTimeString, countryToTimezone } from './timezone.ts'
 import { PROJECT_KNOWLEDGE } from './knowledge.ts'
-import { requireRole, DEFAULT_OPERATOR } from './roles.ts'
+import { requireRoleOf, agentIdentity } from './roles.ts'
 
 const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
 const MAX_BYTES = 5 * 1024 * 1024
 
 // ---------- 角色与权限（PRD「三、用户角色」）----------
-// 角色模型收敛在 roles.ts；这里只负责从 args 里解析操作者，再交给它判定。
-function op(args: Record<string, unknown>): string {
-  const v = args.operator
-  return typeof v === 'string' && v.trim() ? v.trim() : DEFAULT_OPERATOR
-}
+// 身份**固定为服务身份**（roles.ts 的 agentIdentity），角色实时取自 lma_user 表。
+// 工具的 schema 里不再有 operator 字段 —— 模型无法通过参数改变身份（F-AUTH-07）。
+function op(_args?: Record<string, unknown>): string { return agentIdentity() }
 
 /** 仅 admin：导入 / 配置 / 账号与画像维护 / 供应商增删改 */
-function requireAdmin(args: Record<string, unknown>) { return requireRole(op(args), ['admin']) }
+function requireAdmin(db: Db) { return requireRoleOf(db, op(), ['admin']) }
 /** admin 或 staff：审核 / 发送 / 跟进 / 导出等业务操作 */
-function requireUser(args: Record<string, unknown>) { return requireRole(op(args), ['admin', 'staff']) }
+function requireUser(db: Db) { return requireRoleOf(db, op(), ['admin', 'staff']) }
 
 // ---------- 上传批次暂存（内存，1 小时过期） ----------
 interface StagedBatch { rows: string[][]; columns: string[]; mapping: Mapping; fileName: string; createdAt: number }
@@ -156,10 +154,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         source_note: { type: 'string', required: true, description: '数据来源备注（合规溯源，如 WCA 导出 2026-09）' },
         default_country: { type: 'string', description: '默认国家（缺失字段填充）' },
         default_language: { type: 'string', description: '默认语言（如 en）' },
-        operator: { type: 'string', description: '操作者标识（审计用）' },
       },
       async execute(args) {
-        const admin = requireAdmin(args)
+        const admin = requireAdmin(db)
         if (!admin.ok) throw new Error(admin.error)
         const batch = getBatch(String(args.batch_id ?? ''))
         if (!batch) throw new Error('batch_id 不存在或已过期（1 小时），请重新执行 lma_import_preview')
@@ -203,10 +200,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         country: { type: 'string', description: '按国家筛选' },
         status: { type: 'string', description: '按状态筛选' },
         q: { type: 'string', description: '关键词（公司名/邮箱/联系人/主营）' },
-        operator: { type: 'string', description: '操作者标识（审计用）' },
       },
       async execute(args) {
-        const perm = requireUser(args)
+        const perm = requireUser(db)
         if (!perm.ok) throw new Error(perm.error)
         const where = ['deleted_at IS NULL']
         const a: unknown[] = []
@@ -293,10 +289,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         phone: { type: 'string' }, fax: { type: 'string' }, website: { type: 'string' },
         business: { type: 'string' }, networks: { type: 'string' }, country: { type: 'string' },
         region: { type: 'string' }, preferred_language: { type: 'string' },
-        operator: { type: 'string', description: '操作者标识（审计用）' },
       },
       async execute(args) {
-        const perm = requireAdmin(args)
+        const perm = requireAdmin(db)
         if (!perm.ok) throw new Error(perm.error)
         const id = num(args.id, 0)
         const s = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(id)
@@ -330,9 +325,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
     textTool({
       name: 'lma_supplier_delete',
       description: '软删除供应商（保留审计与历史记录）',
-      parameters: { id: { type: 'number', required: true, description: '供应商 ID' }, operator: { type: 'string' } },
+      parameters: { id: { type: 'number', required: true, description: '供应商 ID' } },
       execute(args) {
-        const perm = requireAdmin(args)
+        const perm = requireAdmin(db)
         if (!perm.ok) throw new Error(perm.error)
         const id = num(args.id, 0)
         const s = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(id) as { email: string } | undefined
@@ -410,10 +405,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         subject: { type: 'string', description: '改后批准时的主题' },
         body: { type: 'string', description: '改后批准时的正文' },
         reason: { type: 'string', description: '驳回原因（驳回必填）' },
-        operator: { type: 'string', description: '审核人（审计用）' },
       },
       async execute(args) {
-        const perm = requireUser(args)
+        const perm = requireUser(db)
         if (!perm.ok) throw new Error(perm.error)
         const id = num(args.draft_id, 0)
         const draft = db.prepare('SELECT * FROM email_draft WHERE id = ?').get(id) as { status: string; supplier_id: number } | undefined
@@ -448,9 +442,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
     textTool({
       name: 'lma_send',
       description: '将已批准（approved）的草稿加入发送队列。发送前自动检查：退订名单（实时生效）、邮箱格式、节流间隔、每日上限、对方当地时间工作时段。返回预计发送时间',
-      parameters: { draft_id: { type: 'number', required: true, description: '草稿 ID' }, operator: { type: 'string' } },
+      parameters: { draft_id: { type: 'number', required: true, description: '草稿 ID' } },
       execute(args) {
-        const perm = requireUser(args)
+        const perm = requireUser(db)
         if (!perm.ok) throw new Error(perm.error)
         const id = num(args.draft_id, 0)
         const draft = db.prepare('SELECT * FROM email_draft WHERE id = ?').get(id) as { status: string; supplier_id: number; subject: string; body: string } | undefined
@@ -501,10 +495,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         supplier_id: { type: 'number', required: true, description: '供应商 ID' },
         type: { type: 'string', required: true, enum: ['delivered', 'replied', 'bounced', 'unsubscribed'], description: '事件类型' },
         note: { type: 'string', description: '备注' },
-        operator: { type: 'string' },
       },
       execute(args) {
-        const admin = requireAdmin(args)
+        const admin = requireAdmin(db)
         if (!admin.ok) throw new Error(admin.error)
         const id = num(args.supplier_id, 0)
         const s = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(id) as { id: number; email: string } | undefined
@@ -529,10 +522,10 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
     textTool({
       name: 'lma_unsubscribe_add',
       description: '手动添加退订邮箱（合规操作，写审计日志）。同步将该邮箱的供应商标记为退订并停止一切发送',
-      parameters: { email: { type: 'string', required: true, description: '邮箱' }, note: { type: 'string', description: '备注' }, operator: { type: 'string' } },
+      parameters: { email: { type: 'string', required: true, description: '邮箱' }, note: { type: 'string', description: '备注' } },
       execute(args) {
         // 退订维护按产品决策放开给 staff（一线同事常最先收到"请退订"的回信）
-        const perm = requireUser(args)
+        const perm = requireUser(db)
         if (!perm.ok) throw new Error(perm.error)
         const email = String(args.email ?? '').toLowerCase().trim()
         if (!isValidEmail(email)) throw new Error('邮箱格式错误')
@@ -577,10 +570,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
         auto_followup: { type: 'boolean', description: 'send_policy：是否自动批准跟进邮件' },
         followup_after_days: { type: 'number', description: 'send_policy：跟进间隔天数' },
         followup_max: { type: 'number', description: 'send_policy：跟进最大次数' },
-        operator: { type: 'string' },
       },
       async execute(args) {
-        const admin = requireAdmin(args)
+        const admin = requireAdmin(db)
         if (!admin.ok) throw new Error(admin.error)
         const section = String(args.section)
         if (section === 'profile') {
@@ -630,9 +622,9 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
     textTool({
       name: 'lma_followup_check',
       description: '触发跟进规则检查（admin / staff 均可）：对 3 天未回复且未超上限的已发送供应商生成跟进草稿。默认只生成草稿进审核队列（autoFollowup=false）',
-      parameters: { operator: { type: 'string' } },
+      parameters: {},
       async execute(args) {
-        const perm = requireUser(args)
+        const perm = requireUser(db)
         if (!perm.ok) throw new Error(perm.error)
         const result = await checkFollowups(db, perm.operator)
         audit(db, perm.operator, 'followup_check', 'supplier', null, result)

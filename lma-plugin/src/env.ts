@@ -47,7 +47,6 @@ export function missingServerConfig(): string[] {
   if (!IS_SERVER) return []
   const missing: string[] = []
   if (!(process.env.LMA_PUBLIC_URL ?? '').trim()) missing.push('LMA_PUBLIC_URL')
-  if (!(process.env.LMA_SESSION_SECRET ?? '').trim()) missing.push('LMA_SESSION_SECRET')
   return missing
 }
 

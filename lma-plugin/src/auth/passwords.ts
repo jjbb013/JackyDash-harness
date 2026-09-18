@@ -83,7 +83,7 @@ export async function verifyPassword(password: string, stored: string): Promise<
   }
 
   // 未知格式：跑一次等价开销的哈希再返回 false（防时序枚举）
-  await scryptAsync(password, Buffer.alloc(16), DEFAULT_SCRYPT.keylen, DEFAULT_SCRYPT)
+  await scryptAsync(password, Buffer.alloc(16), currentParams().keylen, currentParams())
   return false
 }
 

@@ -26,10 +26,23 @@ async function call(name: string, args: unknown): Promise<{ value: unknown; cont
 }
 
 const val = (r: { value: unknown }) => JSON.parse(String(r.value))
+const txt = (r: { content: unknown }) =>
+  (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join(' ')
+
+/** 工具层的固定服务身份（与 vitest.config 的 LMA_AGENT_USER 一致） */
+const AGENT = process.env.LMA_AGENT_USER ?? 'test-agent'
+let dbRef: ReturnType<typeof openDb>
+/** 切换服务身份在 lma_user 里的角色/状态，用于验证后端角色强制 */
+function setAgent(role: 'admin' | 'staff', status: 'active' | 'disabled' = 'active'): void {
+  dbRef.prepare('UPDATE lma_user SET role = ?, status = ? WHERE username = ?').run(role, status, AGENT)
+}
 
 beforeAll(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lma-harness-'))
-  const db = openDb(path.join(tmp, 'harness.db'))
+  dbRef = openDb(path.join(tmp, 'harness.db'))
+  const db = dbRef
+  // 工具以固定服务身份执行：先在库里登记该身份（角色由各用例按需切换）
+  db.prepare("INSERT INTO lma_user (username, password_hash, role, status) VALUES (?, 'x', 'admin', 'active')").run(AGENT)
   ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -73,16 +86,19 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
     batchId = p.batch_id
   })
 
-  it('2) 非管理员操作被拒绝（角色控制）', async () => {
-    const r = await call('lma_import_confirm', { batch_id: batchId, dedupe_strategy: 'skip', source_note: 'WCA', operator: 'outsider' })
-    expect(r.isError).toBe(true)
-    // 错误文本在 content 中（value 为空）
-    const text = (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join(' ')
-    expect(text).toMatch(/管理员/)
+  it('2) 服务身份为 staff 时，管理员专属操作被拒绝（后端角色强制）', async () => {
+    setAgent('staff')
+    try {
+      const r = await call('lma_import_confirm', { batch_id: batchId, dedupe_strategy: 'skip', source_note: 'WCA' })
+      expect(r.isError).toBe(true)
+      expect(txt(r)).toMatch(/管理员/)
+    } finally {
+      setAgent('admin')
+    }
   })
 
   it('3) 确认导入成功', async () => {
-    const r = await call('lma_import_confirm', { batch_id: batchId, dedupe_strategy: 'skip', source_note: 'WCA Netherlands 2026-09', default_country: 'NL', operator: 'test-admin' })
+    const r = await call('lma_import_confirm', { batch_id: batchId, dedupe_strategy: 'skip', source_note: 'WCA Netherlands 2026-09', default_country: 'NL' })
     expect(r.isError).toBe(false)
     const rep = val(r)
     expect(rep.report.successRows).toBe(61)
@@ -116,9 +132,9 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
   })
 
   it('7) 审核：先驳回缺原因报错，再批准', async () => {
-    const bad = await call('lma_review', { draft_id: draftId, action: 'reject', operator: 'test-admin' })
+    const bad = await call('lma_review', { draft_id: draftId, action: 'reject' })
     expect(bad.isError).toBe(true)
-    const ok = await call('lma_review', { draft_id: draftId, action: 'approve', operator: 'test-admin' })
+    const ok = await call('lma_review', { draft_id: draftId, action: 'approve' })
     expect(ok.isError).toBe(false)
     const q = await call('lma_review_queue', { status: 'approved' })
     const qq = val(q)
@@ -126,7 +142,7 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
   })
 
   it('8) 批准后发送入队（非工作时段自动排队）', async () => {
-    const r = await call('lma_send', { draft_id: draftId, operator: 'test-admin' })
+    const r = await call('lma_send', { draft_id: draftId })
     expect(r.isError).toBe(false)
     const s = val(r)
     expect(s.queued).toBeDefined()
@@ -135,14 +151,14 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
   })
 
   it('8b) 重复发送同一草稿被拒绝（幂等）', async () => {
-    const r = await call('lma_send', { draft_id: draftId, operator: 'test-admin' })
+    const r = await call('lma_send', { draft_id: draftId })
     expect(r.isError).toBe(true)
     const text = (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join(' ')
     expect(text).toMatch(/队列中|已发送/)
   })
 
   it('9) 事件补录（管理员）：回复 → 需人工处理', async () => {
-    const r = await call('lma_event_record', { supplier_id: supplierId, type: 'replied', note: 'test', operator: 'test-admin' })
+    const r = await call('lma_event_record', { supplier_id: supplierId, type: 'replied', note: 'test' })
     expect(r.isError).toBe(false)
     const d = await call('lma_supplier_detail', { id: supplierId })
     const dd = val(d)
@@ -153,7 +169,7 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
 
 describe('导出 / 退订 / 跟进（关键合规路径）', () => {
   it('导出 CSV：带 BOM、含状态与业务字段、记录导出日志', async () => {
-    const r = await call('lma_export_csv', { country: 'NL', operator: 'test-admin' })
+    const r = await call('lma_export_csv', { country: 'NL' })
     expect(r.isError).toBe(false)
     const csv = String(r.value)
     expect(csv).toContain('\uFEFF') // BOM 位于 CSV 文本首
@@ -167,7 +183,7 @@ describe('导出 / 退订 / 跟进（关键合规路径）', () => {
     const ss = val(s)
     const sid = ss.groups[0].suppliers[0].id
     const email = ss.groups[0].suppliers[0].email
-    const r = await call('lma_unsubscribe_add', { email, note: '客户明确要求', operator: 'test-admin' })
+    const r = await call('lma_unsubscribe_add', { email, note: '客户明确要求' })
     expect(r.isError).toBe(false)
     const list = await call('lma_unsubscribes', {})
     expect(JSON.stringify(list.value)).toContain(email)
@@ -194,10 +210,16 @@ describe('配置与知识库', () => {
     expect(c.send_policy.dailyLimit).toBe(20)
   })
 
-  it('config_update 需要管理员', async () => {
-    const r = await call('lma_config_update', { section: 'send_policy', daily_limit: 30, operator: 'outsider' })
-    expect(r.isError).toBe(true)
-    const ok = await call('lma_config_update', { section: 'send_policy', daily_limit: 30, operator: 'test-admin' })
+  it('config_update 仅管理员可用（服务身份为 staff 时被拒）', async () => {
+    setAgent('staff')
+    try {
+      const denied = await call('lma_config_update', { section: 'send_policy', daily_limit: 30 })
+      expect(denied.isError).toBe(true)
+      expect(txt(denied)).toMatch(/管理员/)
+    } finally {
+      setAgent('admin')
+    }
+    const ok = await call('lma_config_update', { section: 'send_policy', daily_limit: 30 })
     expect(ok.isError).toBe(false)
   })
 
@@ -210,65 +232,70 @@ describe('配置与知识库', () => {
   })
 })
 
-describe('角色权限（PRD 三、用户角色：admin / staff）', () => {
-  const txt = (r: { content: unknown }) =>
-    (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join(' ')
-
-  it('staff 可导出数据（导出权限 admin 与 staff 均有）', async () => {
-    const r = await call('lma_export_csv', { operator: 'test-staff' })
-    expect(r.isError).toBe(false)
+describe('角色权限（服务身份 + lma_user 角色）', () => {
+  it('服务身份为 admin：管理员专属操作放行', async () => {
+    setAgent('admin')
+    expect((await call('lma_followup_check', {})).isError).toBe(false)
+    expect((await call('lma_unsubscribe_add', { email: 'admin-can-unsub@example.com' })).isError).toBe(false)
   })
 
-  it('staff 可审核 / 发送 / 跟进（业务操作）——不被权限层拦截', async () => {
-    // 用不存在的草稿：期望失败原因是"草稿不存在"，而不是权限不足
-    const send = await call('lma_send', { draft_id: 999999, operator: 'test-staff' })
-    expect(send.isError).toBe(true)
-    expect(txt(send)).not.toMatch(/权限/)
-    expect(txt(send)).toMatch(/草稿不存在/)
+  it('服务身份为 staff：业务操作放行，管理员专属被拒', async () => {
+    setAgent('staff')
+    try {
+      // 业务操作（导出 / 审核 / 发送 / 跟进 / 退订维护）
+      expect((await call('lma_export_csv', {})).isError).toBe(false)
+      expect((await call('lma_followup_check', {})).isError).toBe(false)
+      expect((await call('lma_unsubscribe_add', { email: 'staff-can-unsub@example.com' })).isError).toBe(false)
 
-    const rev = await call('lma_review', { draft_id: 999999, action: 'approve', operator: 'test-staff' })
-    expect(rev.isError).toBe(true)
-    expect(txt(rev)).not.toMatch(/权限/)
-    expect(txt(rev)).toMatch(/草稿不存在/)
+      const send = await call('lma_send', { draft_id: 999999 })
+      expect(send.isError).toBe(true)
+      expect(txt(send)).not.toMatch(/权限/) // 失败原因是"草稿不存在"，说明权限层放行了
+      expect(txt(send)).toMatch(/草稿不存在/)
 
-    const fu = await call('lma_followup_check', { operator: 'test-staff' })
-    expect(fu.isError).toBe(false)
-
-    // 退订名单维护按产品决策放开给 staff
-    const un = await call('lma_unsubscribe_add', { email: 'staff-can-unsub@example.com', operator: 'test-staff' })
-    expect(un.isError).toBe(false)
-  })
-
-  it('staff 不能导入 / 改配置 / 编辑供应商 / 删除供应商 / 补录事件（管理员专属）', async () => {
-    const cases: Array<[string, Record<string, unknown>]> = [
-      ['lma_import_confirm', { batch_id: 'x', dedupe_strategy: 'skip', source_note: 'y', operator: 'test-staff' }],
-      ['lma_config_update', { section: 'send_policy', daily_limit: 9, operator: 'test-staff' }],
-      ['lma_supplier_edit', { id: 999999, company_name: 'X', operator: 'test-staff' }],
-      ['lma_supplier_delete', { id: 999999, operator: 'test-staff' }],
-      ['lma_event_record', { supplier_id: 999999, type: 'replied', operator: 'test-staff' }],
-    ]
-    for (const [tool, args] of cases) {
-      const r = await call(tool, args)
-      expect(r.isError, `${tool} 应拒绝 staff`).toBe(true)
-      expect(txt(r), `${tool} 的错误应说明缺少管理员权限`).toMatch(/管理员/)
+      // 管理员专属
+      for (const [tool, args] of [
+        ['lma_import_confirm', { batch_id: 'x', dedupe_strategy: 'skip', source_note: 'y' }],
+        ['lma_config_update', { section: 'send_policy', daily_limit: 9 }],
+        ['lma_supplier_edit', { id: 999999, company_name: 'X' }],
+        ['lma_supplier_delete', { id: 999999 }],
+        ['lma_event_record', { supplier_id: 999999, type: 'replied' }],
+      ] as Array<[string, Record<string, unknown>]>) {
+        const r = await call(tool, args)
+        expect(r.isError, `${tool} 应拒绝 staff`).toBe(true)
+        expect(txt(r), `${tool} 的错误应说明缺少管理员权限`).toMatch(/管理员/)
+      }
+    } finally {
+      setAgent('admin')
     }
   })
 
-  it('未列入任何名单的操作者：发送/审核/导出/编辑/退订/跟进一律拒绝', async () => {
-    const cases: Array<[string, Record<string, unknown>]> = [
-      ['lma_send', { draft_id: 999999, operator: 'outsider' }],
-      ['lma_review', { draft_id: 999999, action: 'approve', operator: 'outsider' }],
-      ['lma_export_csv', { operator: 'outsider' }],
-      ['lma_supplier_edit', { id: 999999, company_name: 'X', operator: 'outsider' }],
-      ['lma_supplier_delete', { id: 999999, operator: 'outsider' }],
-      ['lma_unsubscribe_add', { email: 'outsider@example.com', operator: 'outsider' }],
-      ['lma_followup_check', { operator: 'outsider' }],
-      ['lma_config_update', { section: 'send_policy', daily_limit: 9, operator: 'outsider' }],
-    ]
-    for (const [tool, args] of cases) {
-      const r = await call(tool, args)
-      expect(r.isError, `${tool} 应拒绝 outsider`).toBe(true)
-      expect(txt(r), `${tool} 的错误应说明权限`).toMatch(/权限/)
+  it('模型传入的 operator 一律被忽略，无法自封管理员（F-AUTH-07 关键断言）', async () => {
+    setAgent('staff')
+    try {
+      // 过去只要把 operator 填成管理员名字就能提权；现在身份由服务端固定，传什么都没用
+      const spoof = await call('lma_config_update', {
+        section: 'send_policy', daily_limit: 9, operator: 'test-admin',
+      } as Record<string, unknown>)
+      expect(spoof.isError).toBe(true)
+      expect(txt(spoof)).toMatch(/管理员/)
+
+      const spoof2 = await call('lma_import_confirm', {
+        batch_id: 'x', dedupe_strategy: 'skip', source_note: 'y', operator: 'will',
+      } as Record<string, unknown>)
+      expect(spoof2.isError).toBe(true)
+    } finally {
+      setAgent('admin')
+    }
+  })
+
+  it('服务身份被禁用后：受控操作一律拒绝', async () => {
+    setAgent('staff', 'disabled')
+    try {
+      expect((await call('lma_export_csv', {})).isError).toBe(true)
+      expect((await call('lma_followup_check', {})).isError).toBe(true)
+      expect((await call('lma_import_confirm', { batch_id: 'x', dedupe_strategy: 'skip', source_note: 'y' })).isError).toBe(true)
+    } finally {
+      setAgent('admin', 'active')
     }
   })
 })

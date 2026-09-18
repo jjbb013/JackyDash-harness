@@ -14,7 +14,8 @@ import { initQueueState, processDue } from './sendqueue.ts'
 import { startImapPolling } from './imap.ts'
 import { checkFollowups } from './followup.ts'
 import { startWebServer } from './web/server.ts'
-import { ensureBootstrapAdmin } from './auth/bootstrap.ts'
+import { ensureBootstrapAdmin, ensureAgentAccount } from './auth/bootstrap.ts'
+import { agentIdentitySummary } from './roles.ts'
 import { purgeExpiredSessions } from './auth/session.ts'
 import { purgeOldAttempts } from './auth/throttle.ts'
 import { envSummary } from './env.ts'
@@ -66,6 +67,9 @@ export function apply(ctx: Context): void {
       console.log('[lma] 如需指定密码，请在启动前设置 LMA_ADMIN_USER / LMA_ADMIN_PASSWORD')
     }
   }
+  const agent = ensureAgentAccount(db)
+  if (agent.created) console.log(`[lma] 已登记 Agent 服务账号：${agent.username}（角色 ${agent.role}）`)
+  console.log(`[lma] ${agentIdentitySummary(db)}`)
   console.log(`[lma] 运行环境：${envSummary(HTTP_PORT, 3080)}`)
 
   // 注册全部业务工具

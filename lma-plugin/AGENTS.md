@@ -15,6 +15,19 @@
 - **退订是回信制**：页脚与 `List-Unsubscribe` 都是 `mailto:`（回复时把 `unsubscribe`/`退订` 写在**主题**里），由 IMAP 关键词识别自动退订；HTTP `/unsubscribe` 端点仅在未配发件地址时兜底。改 `classify()`/`UNSUB_KEYWORDS` 必须同步 `business.spec.ts` 的分类断言。
 - **字段/数据模型**：适配 WCA 导出模板——`emails`/`contacts`/`networks` 分号多值（主邮箱取第一个，其余存 `extra_emails` JSON）、`profile` 长文本、`city` 含邮编存 `region`、`id` 存 `external_id`、`enrolled_since` 直存；`Netherlands` → `NL` → `Europe/Amsterdam`；语言默认 `en`。
 - **我方画像**：Shanghai Transtar International Freight Forwarding Co., Ltd.（2022 年成立；八大服务：清关合规/多式联运/保税智慧仓 5万㎡/集拼/项目物流/门到门/冷链与 ISO TANK/贸易咨询；优势：本土化、100+ 承运商成本、AI TMS、24/7 双语；目标市场 NL/DE/GB/US/AU/SG/FR/BE/IT/ES）。画像在 `db.ts` 默认值，可经 `lma_config_update` 覆盖。
+- **角色与身份（PRD 三）**：角色判定收敛在 `src/roles.ts`，**账号唯一来源是 `lma_user` 表**（无自助注册）。
+  - Web 层：Cookie → 会话 → 用户，角色实时读库（禁用/改角色立即生效）
+  - 工具层：**服务身份**（`LMA_AGENT_USER`，角色取自 `lma_user`）。**工具的 schema 里已删除 `operator` 参数** ——
+    身份由服务端固定，因为 DSH 的工具上下文拿不到"人"（`agent.id` 只是聊天会话 id）。
+    ⚠️ **绝不要重新引入可从参数指定身份的设计**，那等于让模型自封 admin。
+  - 仅 admin：`lma_import_confirm`、`lma_config_update`、`lma_event_record`、`lma_supplier_edit`、`lma_supplier_delete`
+  - admin 或 staff：`lma_review`、`lma_send`、`lma_followup_check`、`lma_export_csv`、`lma_unsubscribe_add`
+  - Web 的 `/api/*` 走 `web/api.ts` 的 `ROUTE_ROLES` **白名单**：未登记 404、角色不符 403 + 审计
+  - 引导：`lma_user` 为空时启动创建 admin（`LMA_ADMIN_USER`/`LMA_ADMIN_PASSWORD`），库非空绝不复写
+  - 测试：身份用 `test-agent`；切角色用 `setAgent('staff')`，越权断言错误文本含「管理员」
+
+- **字段/数据模型**：适配 WCA 导出模板——`emails`/`contacts`/`networks` 分号多值（主邮箱取第一个，其余存 `extra_emails` JSON）、`profile` 长文本、`city` 含邮编存 `region`、`id` 存 `external_id`、`enrolled_since` 直存；`Netherlands` → `NL` → `Europe/Amsterdam`；语言默认 `en`。
+- **我方画像**：Shanghai Transtar International Freight Forwarding Co., Ltd.（2022 年成立；八大服务：清关合规/多式联运/保税智慧仓 5万㎡/集拼/项目物流/门到门/冷链与 ISO TANK/贸易咨询；优势：本土化、100+ 承运商成本、AI TMS、24/7 双语；目标市场 NL/DE/GB/US/AU/SG/FR/BE/IT/ES）。画像在 `db.ts` 默认值，可经 `lma_config_update` 覆盖。
 - **角色模型（PRD 三）**：`admin` = `LMA_ADMINS`，`staff` = `LMA_STAFF`（都是逗号分隔的操作者名单，模块加载时读取）。**判定收敛在 `src/roles.ts` 一处**，`tools.ts` 与 `web/api.ts` 共用。
   - 仅 admin：`lma_import_confirm`（CSV 导入）、`lma_config_update`、`lma_event_record`、`lma_supplier_edit`、`lma_supplier_delete`、`lma_unsubscribe_add`
   - admin 或 staff：`lma_review`、`lma_send`、`lma_followup_check`、`lma_export_csv`
@@ -37,7 +50,7 @@ src/index.ts ── openDb(迁移) + seedDefaults + 注册工具 + ctx.effect �
 
 ## 测试
 
-`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **50/50**。
+`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **90/90**。
 `tests/harness.spec.ts` 证明插件在 dsh 内可加载可执行（`new Context()` + `ctx.plugin(SystemPrompt)` + `ctx.plugin(ToolRuntime)` + `ctx.tools.register(buildLmaTools(db))` + `ctx.tools.execute(...)`）。
 新增工具必须在此文件登记断言；改导入管道必须跑真实 `wca_netherlands.csv` 夹具用例。
 

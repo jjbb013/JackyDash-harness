@@ -1,33 +1,28 @@
-// 角色与权限（PRD「三、用户角色」）——全系统权限判定的**唯一收敛点**
+// 角色与权限 —— 全系统权限判定的**唯一收敛点**
 //
 //   admin（管理员）：全部 —— 导入/导出数据、配置、管理账号、维护业务画像、审核、发送、看统计
 //   staff（业务伙伴）：业务操作 —— 查看列表、审核邮件、发送、标记跟进、导出数据
 //
-// 约束（PRD）：登录仅对指定人员开放、无自助注册、账号由管理员创建；
-// CSV 导入仅 admin，导出 admin 与 staff 均可；两种角色共用一个页面，前端按角色控制按钮可见性。
+// 账号来源唯一：**`lma_user` 表**（无自助注册，由 admin 在「人员管理」中创建）。
+// 两条调用链都从这里取角色：
+//   1. Web 层：Cookie → 会话 → 用户（server.ts 调 readSession，角色随会话返回）
+//   2. 工具层：**服务身份**（F-AUTH-07）——Agent 工具由插件以固定服务账号执行，
+//      **绝不接受模型传入的操作者**，否则模型只要填一个管理员名字就能自封 admin。
 //
-// 当前实现：名单来自环境变量 LMA_ADMINS / LMA_STAFF，在模块加载时读取。
-// 接入登录后改为查 DB 的 lma_user 表（已含 username/password_hash/role/status）——
-// **只需改本文件**，调用方（tools.ts / web/api.ts）无需改动。
-//
-// 注意：前端隐藏按钮只是体验，后端必须强制校验（本文件就是后端那道闸）。
+// 前端隐藏按钮只是体验，后端必须强制（本文件就是那道闸）。
+
+import type { Db } from './db.ts'
 
 export type Role = 'admin' | 'staff'
 
-const roleSet = (v: string | undefined): Set<string> =>
-  new Set((v ?? '').split(',').map((s) => s.trim()).filter(Boolean))
+const ROLES: readonly string[] = ['admin', 'staff']
 
-const ADMINS = roleSet(process.env.LMA_ADMINS)
-const STAFF = roleSet(process.env.LMA_STAFF)
-
-/** 未显式传 operator 时的默认审计操作者 */
-export const DEFAULT_OPERATOR = process.env.LMA_OPERATOR ?? 'harness-agent'
-
-/** 解析操作者角色；不在任何名单里返回 null（= 未授权） */
-export function roleOf(operator: string): Role | null {
-  if (ADMINS.has(operator)) return 'admin'
-  if (STAFF.has(operator)) return 'staff'
-  return null
+/** 查账号当前角色；不存在或已禁用返回 null */
+export function roleOfUser(db: Db, username: string): Role | null {
+  const name = String(username ?? '').trim()
+  if (!name) return null
+  const row = db.prepare("SELECT role FROM lma_user WHERE username = ? AND status = 'active'").get(name) as { role: string } | undefined
+  return row && ROLES.includes(row.role) ? (row.role as Role) : null
 }
 
 export interface Permission {
@@ -37,20 +32,35 @@ export interface Permission {
   error?: string
 }
 
-/** 校验操作者是否具备 allowed 中的任一角色 */
-export function requireRole(operator: string, allowed: Role[]): Permission {
-  const role = roleOf(operator)
+/** 校验某身份是否具备 allowed 中的任一角色 */
+export function requireRoleOf(db: Db, operator: string, allowed: Role[]): Permission {
+  const role = roleOfUser(db, operator)
   if (!role || !allowed.includes(role)) {
     const need = allowed.includes('admin') && allowed.includes('staff')
       ? '管理员或业务伙伴'
       : allowed.includes('admin') ? '管理员' : '业务伙伴'
     return {
       ok: false, operator,
-      error: `当前操作者（${operator}）无${need}权限；名单由 LMA_ADMINS / LMA_STAFF 环境变量指定`,
+      error: `当前身份（${operator}）无${need}权限；账号与角色由管理员在「人员管理」中维护`,
     }
   }
   return { ok: true, operator, role }
 }
 
-export const isAdmin = (operator: string): boolean => roleOf(operator) === 'admin'
-export const isAuthorized = (operator: string): boolean => roleOf(operator) !== null
+/**
+ * Agent 工具的服务身份（F-AUTH-07）。
+ * 由 LMA_AGENT_USER 指定（默认 harness-agent），角色取自 `lma_user`。
+ * 这是"聊天 UI 里谁能做什么"的唯一决定因素 —— 模型无法通过工具参数改变它。
+ */
+export function agentIdentity(): string {
+  return ((process.env.LMA_AGENT_USER ?? 'harness-agent').trim()) || 'harness-agent'
+}
+
+/** 启动日志用：当前服务身份与其角色 */
+export function agentIdentitySummary(db: Db): string {
+  const who = agentIdentity()
+  const role = roleOfUser(db, who)
+  return role
+    ? `服务身份=${who}（${role === 'admin' ? '管理员' : '业务伙伴'}）`
+    : `服务身份=${who}（⚠️ 未在 lma_user 中登记或已禁用 —— 受控工具将全部拒绝）`
+}

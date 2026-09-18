@@ -82,8 +82,11 @@ pnpm --filter @lma/dsh-plugin run build:client   # tsc → lib/types，tsdown �
 |---|---|---|
 | `LMA_DB_PATH` | `<仓库根>/lma-data/lma.db` | SQLite 路径 |
 | `LMA_DB_BACKUP_DIR` | 空（不备份） | 每日备份目录（保留 14 份） |
-| `LMA_ADMINS` | 空 | **admin** 名单（逗号分隔）。全部权限：导入/导出/配置/账号与画像/审核/发送/统计 |
-| `LMA_STAFF` | 空 | **staff** 名单（逗号分隔）。业务操作：查看列表/审核邮件/发送/标记跟进/导出数据 |
+| `LMA_ADMIN_USER` / `LMA_ADMIN_PASSWORD` | `admin` / 空 | 首个管理员引导（仅当 `lma_user` 为空时生效）。不配密码则生成一次性密码并强制首登改密 |
+| `LMA_AGENT_USER` / `LMA_AGENT_ROLE` | `harness-agent` / `admin` | Agent 工具的**服务身份**与其初始角色（角色以 `lma_user` 为准） |
+| `LMA_PUBLIC_URL` | 空（本地回退 `http://127.0.0.1:3081`） | 对外访问地址，决定邮件退订链接与 Cookie 属性。**Linux 服务器必配**（如 `https://jackydash.will-pan.com/lma`） |
+| `LMA_COOKIE_SECURE` | 由 `LMA_PUBLIC_URL` 是否 https 推断 | 显式覆盖 Cookie `Secure`（`1`/`true` 强制开，`0`/`false` 强制关） |
+| `LMA_SCRYPT_N` | `65536` | 密码哈希强度（≥16384 才生效）。2G VPS 默认值单次登录约 100~300ms |
 | `LMA_OPERATOR` | `harness-agent` | 工具未传 operator 时默认审计操作者 |
 | `LMA_BASE_URL` | `http://127.0.0.1:3081` | HTTP 退订端点域名。**仅在未配置发件地址时**作为页脚兜底（默认走回信退订，见 §五）；生产可改 HTTPS 域名反代到 `LMA_HTTP_PORT` |
 | `LMA_HTTP_PORT` | `3081` | 插件内置 Web 服务端口：`/` 仪表盘、`/unsubscribe` 退订端点、`/api/*` JSON API（绑 127.0.0.1，Node 原生 http，零依赖） |
@@ -193,33 +196,45 @@ classify() 命中 → 写入 unsubscribe_list(source='reply_keyword')
 `GET /unsubscribe?e=<email>&t=<hmac>` 仍在（`src/unsubscribe.ts`，常数时间校验 + 幂等写入），
 但只在**未配置 `LMA_MAIL_FROM` / `LMA_SMTP_USER`** 时才会出现在页脚里，作为本地/离线环境的后备路径。
 
-### 5.6 角色与权限（PRD 三、用户角色）
+### 5.6 账号、登录与角色权限（PRD 三、用户角色）
 
-判定逻辑**收敛在 `src/roles.ts` 一处**，`tools.ts`（Agent 工具）与 `web/api.ts`（仪表盘）共用：
+**账号唯一来源是 `lma_user` 表**（无自助注册）：管理员在仪表盘「人员管理」中创建，系统不提供注册入口。
+角色判定**收敛在 `src/roles.ts` 一处**，Web 层与工具层共用。
 
-| 角色 | 名单来源 | 权限 |
+| 角色 | 权限 |
+|---|---|
+| **admin**（管理员） | 全部：导入/导出数据、配置、管理账号、维护业务画像、审核、发送、看统计 |
+| **staff**（业务伙伴） | 业务操作：查看列表、审核邮件、发送、标记跟进、导出数据 |
+
+身份有**两条链**，都从 `lma_user` 取角色：
+
+| 链路 | 身份来源 | 说明 |
 |---|---|---|
-| **admin** | `LMA_ADMINS` | 全部：导入/导出数据、配置、管理账号、维护业务画像、审核、发送、看统计 |
-| **staff** | `LMA_STAFF` | 业务操作：查看列表、审核邮件、发送、标记跟进、导出数据 |
+| **Web（仪表盘）** | Cookie → 会话 → 用户 | `server.ts` 解析 Cookie 后 `readSession()`，角色**实时**读库，所以禁用/改角色立即生效 |
+| **工具（聊天里的 Agent）** | **服务身份**（`LMA_AGENT_USER`，角色取自 `lma_user`） | F-AUTH-07 |
+
+> ⚠️ **为什么工具层要用固定服务身份**：DSH 的工具执行上下文只有 `callId/name/arguments/agent`，
+> 其中 `agent.id` 是"聊天会话 id"而**不是人**（整个 Harness 没有用户体系）。也就是说工具调用
+> **无法知道坐在聊天窗口前的是谁**。所以身份必须由插件在服务端决定 —— 早期版本把 `operator`
+> 作为工具参数由**模型自由填写**，模型只要填一个管理员名字就能自封 admin，这条提权通道现已删除。
 
 按工具的落点：
 
 | 工具 | 要求 |
 |---|---|
-| `lma_import_confirm`（CSV 导入） | **仅 admin** |
-| `lma_config_update`（配置/画像） | **仅 admin** |
-| `lma_event_record`（人工补录事件） | **仅 admin** |
-| `lma_supplier_edit` / `lma_supplier_delete` | **仅 admin** |
-| `lma_unsubscribe_add`（退订名单维护） | **仅 admin** |
-| `lma_review`（审核）/ `lma_send`（发送）/ `lma_followup_check`（跟进） | admin 或 staff |
-| `lma_export_csv`（导出） | admin 或 staff |
+| `lma_import_confirm`、`lma_config_update`、`lma_event_record`、`lma_supplier_edit`、`lma_supplier_delete` | **仅 admin** |
+| `lma_review`、`lma_send`、`lma_followup_check`、`lma_export_csv`、`lma_unsubscribe_add` | admin 或 staff |
 | 只读工具（`lma_dashboard`/`lma_suppliers`/…） | 不校验 |
 
-注意事项：
+Web 层的 `/api/*` 用**路由×角色白名单**（`web/api.ts` 的 `ROUTE_ROLES`）：未登记的路径 404、
+角色不符 403 并写审计；`/unsubscribe` 是唯一匿名可达的业务端点（token 即凭证）。
 
-- **不在任何名单里的操作者，写操作一律拒绝**；未显式传 `operator` 时取 `LMA_OPERATOR`（默认 `harness-agent`），**它不在任何名单里，所以有权限要求的工具必须显式传 `operator`**
-- 前端隐藏按钮只是体验，**后端必须强制**（`roles.ts` 就是那道闸）
-- 这是环境变量版的最小落地；接入登录后把 `roles.ts` 改成查 `lma_user` 表（已含 `username`/`password_hash`/`role`/`status`）即可，**调用方不用动**
+**首个管理员（防止把自己锁死）**：库中一个用户都没有时，插件启动会创建 admin ——
+用 `LMA_ADMIN_USER` / `LMA_ADMIN_PASSWORD` 指定则直接可用；未指定则生成一次性随机密码
+**仅打印一次**并强制首登改密。库中已有用户时**绝不复写**。
+
+**Agent 服务账号**：默认 `harness-agent`，角色由 `LMA_AGENT_ROLE`（默认 admin）决定；
+想限制"聊天里只能做业务操作"就把它改成 staff，或直接在「人员管理」里改它的角色。它的密码是随机值且永不打印，无法用于网页登录。
 
 ## 六、工具清单（模型可调用）
 
@@ -243,7 +258,7 @@ classify() 命中 → 写入 unsubscribe_list(source='reply_keyword')
 pnpm vitest run --config lma-plugin/vitest.config.ts
 ```
 
-当前 **50 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
+当前 **90 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
 
 ## 八、部署（1 核 2G 生产）
 
