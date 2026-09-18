@@ -85,6 +85,13 @@ export async function pollOnce(db: Db): Promise<{ skipped: boolean; handled?: nu
   const client = new ImapFlow({
     host: IMAP_HOST, port: IMAP_PORT, secure: IMAP_TLS,
     auth: { user: IMAP_USER, pass: IMAP_PASS }, logger: false,
+    socketTimeout: 120_000, greetingTimeout: 30_000,
+  })
+  // imapflow 在 socket 超时/断连时会 emit('error')。EventEmitter 上若无人监听 'error'，Node 会把它
+  // 当未捕获异常直接抛出——实测后果是整个 dsh 进程崩溃退出（IMAP socket 超时 → harness 挂掉，
+  // 3080/3081 全断）。必须挂兜底监听，让连接故障只影响本轮轮询。
+  client.on('error', (e: Error) => {
+    console.error('[lma:imap] 连接错误（已忽略，进程继续运行）：', e.message)
   })
   let handled = 0
   try {
