@@ -36,6 +36,16 @@ function scryptAsync(password: string, salt: Buffer, keylen: number, p: ScryptPa
   })
 }
 
+/**
+ * 同步版本，**仅用于进程启动时的引导建号**（cordis 的 apply 是同步的）。
+ * 其余所有路径一律用异步版，避免阻塞事件循环。
+ */
+export function hashPasswordSync(password: string, p: ScryptParams = currentParams()): string {
+  const salt = crypto.randomBytes(16)
+  const hash = crypto.scryptSync(password, salt, p.keylen, { N: p.N, r: p.r, p: p.p, maxmem: maxmemFor(p) })
+  return `scrypt$${p.N}$${p.r}$${p.p}$${salt.toString('base64')}$${hash.toString('base64')}`
+}
+
 /** 生成密码哈希 */
 export async function hashPassword(password: string, p: ScryptParams = currentParams()): Promise<string> {
   const salt = crypto.randomBytes(16)

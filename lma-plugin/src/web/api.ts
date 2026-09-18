@@ -1,13 +1,13 @@
 // LMA 仪表盘 JSON API：供插件自带 Web 页面（/）调用
-// 写操作按 PRD 角色表校验 X-LMA-Operator（审核：admin/staff；手动退订：仅 admin），
-// 统一走 roles.ts 的角色判定；只读操作当前无需身份（本服务默认只绑 127.0.0.1，
-// 部署到 VPS 前必须补上真正的登录鉴权，见 README「部署」章节）。
+// 身份来自**会话**（server.ts 解析 Cookie → readSession），不再信任任何客户端传入的操作者字段。
+// 每个路由在 ROUTE_ROLES 里显式登记「允许的方法 + 允许的角色」，**未登记即 404、角色不符即 403**
+// （白名单而非黑名单：新增端点忘了登记权限时会直接拒绝，不会默认放行）。
 import type { Db } from '../db.ts'
 import { getProfile, getEmailTemplate, getSendPolicy } from '../db.ts'
 import { queueSnapshot, todaySentCount } from '../sendqueue.ts'
 import { audit } from '../audit.ts'
 import { isValidEmail, sqlNow } from '../util.ts'
-import { requireRole } from '../roles.ts'
+import type { SessionUser } from '../auth/session.ts'
 
 export interface ApiResponse { status: number; body: unknown }
 
@@ -80,10 +80,8 @@ function reviewQueue(db: Db, p: URLSearchParams): ApiResponse {
   return { status: 200, body: { total, page, size, rows } }
 }
 
-function review(db: Db, operator: string, body: Record<string, unknown>): ApiResponse {
-  // PRD 角色表：staff 也可以审核邮件
-  const perm = requireRole(operator, ['admin', 'staff'])
-  if (!perm.ok) return { status: 403, body: { error: perm.error } }
+function review(db: Db, user: SessionUser, body: Record<string, unknown>): ApiResponse {
+  const operator = user.username // 角色判定已由 ROUTE_ROLES 完成
   const id = num(String(body.draft_id ?? ''), 0)
   const action = String(body.action ?? '')
   const draft = db.prepare('SELECT * FROM email_draft WHERE id = ?').get(id) as { status: string; supplier_id: number } | undefined
@@ -122,10 +120,8 @@ function unsubscribes(db: Db): ApiResponse {
   return { status: 200, body: { rows } }
 }
 
-function unsubscribeAdd(db: Db, operator: string, body: Record<string, unknown>): ApiResponse {
-  // 退订名单维护为合规动作，PRD 角色表未授予 staff，仅 admin
-  const perm = requireRole(operator, ['admin'])
-  if (!perm.ok) return { status: 403, body: { error: perm.error } }
+function unsubscribeAdd(db: Db, user: SessionUser, body: Record<string, unknown>): ApiResponse {
+  const operator = user.username // 角色判定已由 ROUTE_ROLES 完成
   const email = String(body.email ?? '').toLowerCase().trim()
   if (!isValidEmail(email)) return { status: 400, body: { error: '邮箱格式错误' } }
   db.prepare('INSERT OR IGNORE INTO unsubscribe_list (email, source, unsubscribed_at, handled_by, note) VALUES (?, ?, ?, ?, ?)')
@@ -142,17 +138,51 @@ function config(db: Db): ApiResponse {
 /**
  * 路由一条 /api/* 请求；不属于 API 的路径返回 null（由调用方继续处理）。
  */
-export function handleApi(db: Db, method: string, pathname: string, params: URLSearchParams, operator: string, body: Record<string, unknown>): ApiResponse | null {
-  switch (pathname) {
-    case '/api/overview': return method === 'GET' ? overview(db) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/suppliers': return method === 'GET' ? suppliers(db, params) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/supplier': return method === 'GET' ? supplierDetail(db, params) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/review-queue': return method === 'GET' ? reviewQueue(db, params) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/review': return method === 'POST' ? review(db, operator, body) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/send-queue': return method === 'GET' ? sendQueue(db) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/unsubscribes': return method === 'GET' ? unsubscribes(db) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/unsubscribe': return method === 'POST' ? unsubscribeAdd(db, operator, body) : { status: 405, body: { error: 'Method Not Allowed' } }
-    case '/api/config': return method === 'GET' ? config(db) : { status: 405, body: { error: 'Method Not Allowed' } }
-    default: return null
+export interface ApiContext { ip: string; ua: string }
+
+/**
+ * 路由 × 角色 白名单。**新增 /api 端点必须在这里登记**，否则一律 404；
+ * 登记了但角色不符 → 403 并写审计（拒绝也要留痕）。
+ * 后续阶段会加入：/api/send、/api/export、/api/followup、/api/import、/api/users、/api/ai-config。
+ */
+const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 'staff'> }> = {
+  '/api/overview':     { methods: ['GET'],  roles: ['admin', 'staff'] },
+  '/api/suppliers':    { methods: ['GET'],  roles: ['admin', 'staff'] },
+  '/api/supplier':     { methods: ['GET'],  roles: ['admin', 'staff'] },
+  '/api/review-queue': { methods: ['GET'],  roles: ['admin', 'staff'] },
+  '/api/send-queue':   { methods: ['GET'],  roles: ['admin', 'staff'] },
+  '/api/unsubscribes': { methods: ['GET'],  roles: ['admin', 'staff'] },
+  '/api/config':       { methods: ['GET'],  roles: ['admin'] },        // 配置/画像：仅 admin
+  // 写操作
+  '/api/review':       { methods: ['POST'], roles: ['admin', 'staff'] }, // 审核邮件：两角色
+  '/api/unsubscribe':  { methods: ['POST'], roles: ['admin', 'staff'] }, // 退订名单维护：按决策放开给 staff
+}
+
+/** 路由一条 /api/* 请求。未登记路径返回 404；角色不符返回 403（并写审计）。 */
+export function handleApi(
+  db: Db, method: string, pathname: string, params: URLSearchParams,
+  user: SessionUser, body: Record<string, unknown>, ctx: ApiContext,
+): ApiResponse {
+  const route = ROUTE_ROLES[pathname]
+  if (!route) return { status: 404, body: { error: '接口不存在' } }
+  if (!route.methods.includes(method)) return { status: 405, body: { error: 'Method Not Allowed' } }
+  if (!route.roles.includes(user.role)) {
+    audit(db, user.username, 'api.denied', 'api', null, { pathname, method, role: user.role }, {
+      ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId, result: 'denied',
+    })
+    return { status: 403, body: { error: `当前角色（${user.role}）无权访问 ${pathname}` } }
   }
+
+  switch (pathname) {
+    case '/api/overview':     return overview(db)
+    case '/api/suppliers':    return suppliers(db, params)
+    case '/api/supplier':     return supplierDetail(db, params)
+    case '/api/review-queue': return reviewQueue(db, params)
+    case '/api/send-queue':   return sendQueue(db)
+    case '/api/unsubscribes': return unsubscribes(db)
+    case '/api/config':       return config(db)
+    case '/api/review':       return review(db, user, body)
+    case '/api/unsubscribe':  return unsubscribeAdd(db, user, body)
+  }
+  return { status: 404, body: { error: '接口不存在' } }
 }

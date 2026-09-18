@@ -31,7 +31,7 @@ function op(args: Record<string, unknown>): string {
   return typeof v === 'string' && v.trim() ? v.trim() : DEFAULT_OPERATOR
 }
 
-/** 仅 admin：导入 / 配置 / 账号与画像维护 / 供应商增删改 / 退订名单维护 */
+/** 仅 admin：导入 / 配置 / 账号与画像维护 / 供应商增删改 */
 function requireAdmin(args: Record<string, unknown>) { return requireRole(op(args), ['admin']) }
 /** admin 或 staff：审核 / 发送 / 跟进 / 导出等业务操作 */
 function requireUser(args: Record<string, unknown>) { return requireRole(op(args), ['admin', 'staff']) }
@@ -531,7 +531,8 @@ export function buildLmaTools(db: Db): ToolDefinition[] {
       description: '手动添加退订邮箱（合规操作，写审计日志）。同步将该邮箱的供应商标记为退订并停止一切发送',
       parameters: { email: { type: 'string', required: true, description: '邮箱' }, note: { type: 'string', description: '备注' }, operator: { type: 'string' } },
       execute(args) {
-        const perm = requireAdmin(args)
+        // 退订维护按产品决策放开给 staff（一线同事常最先收到"请退订"的回信）
+        const perm = requireUser(args)
         if (!perm.ok) throw new Error(perm.error)
         const email = String(args.email ?? '').toLowerCase().trim()
         if (!isValidEmail(email)) throw new Error('邮箱格式错误')

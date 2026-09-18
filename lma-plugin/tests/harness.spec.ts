@@ -233,15 +233,18 @@ describe('角色权限（PRD 三、用户角色：admin / staff）', () => {
 
     const fu = await call('lma_followup_check', { operator: 'test-staff' })
     expect(fu.isError).toBe(false)
+
+    // 退订名单维护按产品决策放开给 staff
+    const un = await call('lma_unsubscribe_add', { email: 'staff-can-unsub@example.com', operator: 'test-staff' })
+    expect(un.isError).toBe(false)
   })
 
-  it('staff 不能导入 / 改配置 / 编辑供应商 / 删除供应商 / 加退订（管理员专属）', async () => {
+  it('staff 不能导入 / 改配置 / 编辑供应商 / 删除供应商 / 补录事件（管理员专属）', async () => {
     const cases: Array<[string, Record<string, unknown>]> = [
       ['lma_import_confirm', { batch_id: 'x', dedupe_strategy: 'skip', source_note: 'y', operator: 'test-staff' }],
       ['lma_config_update', { section: 'send_policy', daily_limit: 9, operator: 'test-staff' }],
       ['lma_supplier_edit', { id: 999999, company_name: 'X', operator: 'test-staff' }],
       ['lma_supplier_delete', { id: 999999, operator: 'test-staff' }],
-      ['lma_unsubscribe_add', { email: 'staff-check@example.com', operator: 'test-staff' }],
       ['lma_event_record', { supplier_id: 999999, type: 'replied', operator: 'test-staff' }],
     ]
     for (const [tool, args] of cases) {

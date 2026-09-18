@@ -1,6 +1,10 @@
-// LMA 仪表盘页面：单文件 HTML（内联 CSS/JS），由插件 Web 服务在 / 提供
-// 数据全部来自同源的 /api/*；写操作带 X-LMA-Operator 头（管理员校验）
-export function dashboardPage(): string {
+// LMA 仪表盘页面：单文件 HTML（内联 CSS/JS），由插件 Web 服务在 / 提供（需登录）
+// 身份与角色由服务端注入到 window 上的 LMA_USER，前端据此过滤 tab/按钮；
+// 所有请求走**相对路径**，因此本页可挂在子路径（如反向代理的 /lma/）下运行。
+// ⚠️ 前端隐藏只是体验，真正的权限判定在 web/api.ts 的 ROUTE_ROLES（后端强制）。
+export interface PageUser { username: string; role: 'admin' | 'staff'; mustChangePassword: boolean }
+
+export function dashboardPage(user: PageUser): string {
   return `<!doctype html>
 <html lang="zh">
 <head>
@@ -50,31 +54,39 @@ export function dashboardPage(): string {
 <body>
 <header>
   <h1>LMA 物流推广智能体系统</h1>
-  <div class="op">操作者 <input type="text" id="operator" size="10" placeholder="名字"> <span class="muted" id="opHint"></span></div>
+  <div class="op"><span id="whoami" class="muted"></span><button id="logout" type="button">退出</button></div>
 </header>
 <nav id="tabs"></nav>
 <main id="view"></main>
 <div id="toast"></div>
 <script>
+// 第三项是该 tab 所需角色（省略 = 两角色都可见）；后端仍会独立判定
 const TABS = [
-  ['overview', '总览'], ['review', '审核队列'], ['suppliers', '供应商'], ['queue', '发送队列'], ['unsub', '退订名单'], ['config', '配置'],
+  ['overview', '总览'], ['review', '审核队列'], ['suppliers', '供应商'],
+  ['queue', '发送队列'], ['unsub', '退订名单'], ['config', '配置', 'admin'],
 ]
+const USER = ${JSON.stringify(user)}
+const visibleTabs = () => TABS.filter((t) => !t[2] || t[2] === USER.role)
 const $ = (s) => document.querySelector(s)
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
 const fmt = (s) => s ? String(s).replace('T', ' ').slice(0, 19) : '—'
 let tab = 'overview'
 
-const op = $('#operator')
-op.value = localStorage.getItem('lma-operator') || ''
-op.onchange = () => { localStorage.setItem('lma-operator', op.value.trim()); $('#opHint').textContent = '已保存' }
-function operator() { return op.value.trim() }
+$('#whoami').textContent = USER.username + '（' + (USER.role === 'admin' ? '管理员' : '业务伙伴') + '）'
+$('#logout').onclick = async () => {
+  try { await fetch('api/auth/logout', { method: 'POST' }) } catch (e) { /* 忽略 */ }
+  location.href = 'login'
+}
 function toast(msg, isErr) {
   const t = $('#toast'); t.textContent = msg; t.style.background = isErr ? '#b91c1c' : '#111827'; t.style.display = 'block'
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2600)
 }
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { 'X-LMA-Operator': operator(), ...(opts.body ? {'Content-Type':'application/json'} : {}) }, ...opts })
+  // 相对路径：本页可挂在 /lma/ 子路径下（反代剥前缀，浏览器保留前缀）
+  const url = String(path).replace(/^\//, '')
+  const r = await fetch(url, { ...opts, headers: { ...(opts.body ? {'Content-Type':'application/json'} : {}), ...(opts.headers || {}) } })
   const j = await r.json().catch(() => ({}))
+  if (r.status === 401) { location.href = 'login'; throw new Error('会话已过期，请重新登录') }
   if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status))
   return j
 }
@@ -115,7 +127,6 @@ async function renderReview() {
 }
 window.toggleBody = (id) => { const el = $('#body-' + id); el.style.display = el.style.display === 'none' ? 'block' : 'none' }
 window.doReview = async (id, action) => {
-  if (!operator()) return toast('请先在右上角填写操作者名字', true)
   let reason
   if (action === 'reject') { reason = prompt('驳回原因（必填）：'); if (!reason) return }
   try {
@@ -187,7 +198,6 @@ async function renderUnsub() {
     '<table><tr><th>邮箱</th><th>来源</th><th>退订时间</th><th>备注</th></tr>' + rows + '</table></div>'
 }
 window.addUnsub = async () => {
-  if (!operator()) return toast('请先在右上角填写操作者名字', true)
   try {
     await post('/api/unsubscribe', { email: $('#u-email').value, note: $('#u-note').value })
     toast('已加入退订名单'); renderUnsub()
@@ -208,12 +218,34 @@ async function renderConfig() {
 // ---------- 框架 ----------
 const RENDER = { overview: renderOverview, review: renderReview, suppliers: renderSuppliers, queue: renderQueue, unsub: renderUnsub, config: renderConfig }
 function renderTabs() {
-  $('#tabs').innerHTML = TABS.map(([id, label]) =>
+  $('#tabs').innerHTML = visibleTabs().map(([id, label]) =>
     '<button class="' + (tab === id ? 'active' : '') + '" onclick="switchTab(\\'' + id + '\\')">' + label + '</button>').join('')
 }
 window.switchTab = (t) => { tab = t; renderTabs(); RENDER[t]().catch((e) => { $('#view').innerHTML = '<div class="card err">加载失败：' + esc(e.message) + '</div>' }) }
-renderTabs()
-window.switchTab('overview')
+// 首登强制改密：未改密前不渲染业务页面（后端也会用 428 拦住写操作）
+function mustChangePasswordView() {
+  $('#tabs').innerHTML = ''
+  $('#view').innerHTML = '<div class="card"><b>首次登录，请先修改密码</b>'
+    + '<p class="muted">管理员分配的是一次性临时密码，修改后才能使用系统。</p>'
+    + '<div class="row2"><input type="password" id="pw-old" placeholder="当前（临时）密码">'
+    + '<input type="password" id="pw-new" placeholder="新密码（至少 10 位）">'
+    + '<button class="primary" id="pw-go">提交</button></div>'
+    + '<div id="pw-msg" class="muted"></div></div>'
+  $('#pw-go').onclick = async () => {
+    try {
+      await post('api/auth/change-password', { old_password: $('#pw-old').value, new_password: $('#pw-new').value })
+      toast('密码已修改，正在进入系统…')
+      setTimeout(() => location.reload(), 800)
+    } catch (e) { $('#pw-msg').innerHTML = '<span class="err">' + esc(e.message) + '</span>' }
+  }
+}
+
+if (USER.mustChangePassword) {
+  mustChangePasswordView()
+} else {
+  renderTabs()
+  window.switchTab('overview')
+}
 setInterval(() => { if (tab === 'overview' || tab === 'queue') RENDER[tab]().catch(() => {}) }, 15000)
 </script>
 </body>

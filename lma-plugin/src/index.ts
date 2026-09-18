@@ -14,6 +14,10 @@ import { initQueueState, processDue } from './sendqueue.ts'
 import { startImapPolling } from './imap.ts'
 import { checkFollowups } from './followup.ts'
 import { startWebServer } from './web/server.ts'
+import { ensureBootstrapAdmin } from './auth/bootstrap.ts'
+import { purgeExpiredSessions } from './auth/session.ts'
+import { purgeOldAttempts } from './auth/throttle.ts'
+import { envSummary } from './env.ts'
 
 export const name = 'lma'
 export const inject = ['tools']
@@ -53,6 +57,17 @@ export function apply(ctx: Context): void {
   initQueueState(db)
   console.log(`[lma] SQLite 就绪：${DB_PATH}（WAL）`)
 
+  // 首个管理员引导：库里没有任何用户时创建，避免"加了登录墙却没人能登进去"
+  const boot = ensureBootstrapAdmin(db)
+  if (boot.created) {
+    console.log(`[lma] 已创建首个管理员账号：${boot.username}`)
+    if (boot.generatedPassword) {
+      console.log(`[lma] ⚠️ 一次性初始密码（仅本次显示，首次登录后强制修改）：${boot.generatedPassword}`)
+      console.log('[lma] 如需指定密码，请在启动前设置 LMA_ADMIN_USER / LMA_ADMIN_PASSWORD')
+    }
+  }
+  console.log(`[lma] 运行环境：${envSummary(HTTP_PORT, 3080)}`)
+
   // 注册全部业务工具
   const lmaTools = buildLmaTools(db)
   for (const tool of lmaTools) {
@@ -81,6 +96,13 @@ export function apply(ctx: Context): void {
     followTick.unref?.()
     timers.push(followTick)
 
+    // 会话与登录尝试清理：每小时一次，避免表无限增长
+    const purgeTick = setInterval(() => {
+      try { purgeExpiredSessions(db); purgeOldAttempts(db) } catch (e) { console.error('[lma] 清理失败：', (e as Error).message) }
+    }, 3600_000)
+    purgeTick.unref?.()
+    timers.push(purgeTick)
+
     // 数据库每日备份（可选）
     if (BACKUP_DIR) {
       const backupTick = setInterval(() => backupDb(db), 24 * 3600_000)
@@ -91,7 +113,7 @@ export function apply(ctx: Context): void {
     // LMA Web 仪表盘 + 邮件退订端点（dsh 客户端插件经 iframe 嵌入 / 页面）
     const webServer = startWebServer(db, HTTP_PORT)
     webServer.unref?.()
-    console.log(`[lma] Web 仪表盘已启动：http://127.0.0.1:${HTTP_PORT}/（退订端点 /unsubscribe；生产环境将 LMA_BASE_URL 反代到该端口）`)
+    console.log(`[lma] Web 服务已启动：http://127.0.0.1:${HTTP_PORT}/（需登录；邮件退订端点 /unsubscribe 匿名可达）`)
 
     return () => {
       timers.forEach((t) => clearInterval(t))

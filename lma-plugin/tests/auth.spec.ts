@@ -257,3 +257,66 @@ describe('运行环境自适配（macOS/Windows=本地，Linux=服务器）', ()
     }
   })
 })
+
+describe('首个管理员引导（防止加了登录墙却没人能登录）', () => {
+  it('空库 → 自动建 admin 并强制首登改密，返回一次性密码', async () => {
+    const { ensureBootstrapAdmin } = await import('../src/auth/bootstrap.ts')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lma-boot-'))
+    const fresh = openDb(path.join(dir, 'b1.db'))
+    const savedPw = process.env.LMA_ADMIN_PASSWORD
+    delete process.env.LMA_ADMIN_PASSWORD
+    try {
+      const r = ensureBootstrapAdmin(fresh)
+      expect(r.created).toBe(true)
+      expect(r.username).toBe('admin')
+      expect(r.mustChange).toBe(true)
+      expect(r.generatedPassword).toBeTruthy()
+      const row = fresh.prepare("SELECT role, must_change_password FROM lma_user WHERE username = 'admin'").get() as { role: string; must_change_password: number }
+      expect(row.role).toBe('admin')
+      expect(row.must_change_password).toBe(1)
+      // 生成的密码可用来登录
+      const hash = (fresh.prepare("SELECT password_hash FROM lma_user WHERE username = 'admin'").get() as { password_hash: string }).password_hash
+      expect(await verifyPassword(String(r.generatedPassword), hash)).toBe(true)
+    } finally {
+      if (savedPw !== undefined) process.env.LMA_ADMIN_PASSWORD = savedPw
+      fresh.close(); fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('显式 LMA_ADMIN_PASSWORD → 不强制改密、不返回生成密码', async () => {
+    const { ensureBootstrapAdmin } = await import('../src/auth/bootstrap.ts')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lma-boot2-'))
+    const fresh = openDb(path.join(dir, 'b2.db'))
+    const savedPw = process.env.LMA_ADMIN_PASSWORD
+    const savedUser = process.env.LMA_ADMIN_USER
+    process.env.LMA_ADMIN_PASSWORD = 'explicit-strong-pass'
+    process.env.LMA_ADMIN_USER = 'boss'
+    try {
+      const r = ensureBootstrapAdmin(fresh)
+      expect(r.created).toBe(true)
+      expect(r.username).toBe('boss')
+      expect(r.mustChange).toBe(false)
+      expect(r.generatedPassword).toBeUndefined()
+    } finally {
+      if (savedPw === undefined) delete process.env.LMA_ADMIN_PASSWORD; else process.env.LMA_ADMIN_PASSWORD = savedPw
+      if (savedUser === undefined) delete process.env.LMA_ADMIN_USER; else process.env.LMA_ADMIN_USER = savedUser
+      fresh.close(); fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('库中已有用户 → 绝不复写（不重置管理员密码）', async () => {
+    const { ensureBootstrapAdmin } = await import('../src/auth/bootstrap.ts')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lma-boot3-'))
+    const fresh = openDb(path.join(dir, 'b3.db'))
+    const ins = fresh.prepare('INSERT INTO lma_user (username, password_hash, role) VALUES (?, ?, ?)')
+    ins.run('existing', await hashPassword('keep-me-please'), 'staff')
+    const before = fresh.prepare('SELECT COUNT(*) AS c FROM lma_user').get() as { c: number }
+    const r = ensureBootstrapAdmin(fresh)
+    expect(r.created).toBe(false)
+    const after = fresh.prepare('SELECT COUNT(*) AS c FROM lma_user').get() as { c: number }
+    expect(after.c).toBe(before.c) // 没有新增 admin
+    const hash = (fresh.prepare("SELECT password_hash FROM lma_user WHERE username = 'existing'").get() as { password_hash: string }).password_hash
+    expect(await verifyPassword('keep-me-please', hash)).toBe(true) // 原密码未被改动
+    fresh.close(); fs.rmSync(dir, { recursive: true, force: true })
+  })
+})
