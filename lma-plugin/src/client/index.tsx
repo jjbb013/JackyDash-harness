@@ -1,13 +1,15 @@
 // LMA 客户端插件（dsh web 顶部入口）：在侧边栏全局面板列表注册「LMA 推广」图标，
-// 点击后主区展示插件自带的 Web 仪表盘（iframe 嵌入 127.0.0.1:LMA_HTTP_PORT）。
+// 点击后主区展示插件自带的 Web 仪表盘（iframe 嵌入；地址按部署形态解析，见 dashboard-url.ts）。
 // 仅依赖 react（PLATFORM_MODULES 基线），零跨包类型依赖，避免 tsc 项目引用地狱。
 import { createElement, type CSSProperties } from 'react'
+import { dashboardHomeUrl } from './dashboard-url.ts'
 
 export const name = 'lma-client'
 export const inject = ['slots']
 
-// 插件 Web 服务默认端口（LMA_HTTP_PORT，见 lma-plugin/src/index.ts）。bundle 内禁止读 process.env。
-const LMA_HOME = 'http://127.0.0.1:3081/'
+// bundle 里禁止读 process.env，所以地址只能从 window.location 推断：
+// 本机（回环）→ http://127.0.0.1:3081/；公网 → 同源 /lma/
+const LMA_HOME = dashboardHomeUrl(window.location)
 
 const frameStyle: CSSProperties = {
   width: '100%',
