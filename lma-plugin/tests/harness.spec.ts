@@ -116,7 +116,7 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
   })
 
   it('7) 审核：先驳回缺原因报错，再批准', async () => {
-    const bad = await call('lma_review', { draft_id: draftId, action: 'reject' })
+    const bad = await call('lma_review', { draft_id: draftId, action: 'reject', operator: 'test-admin' })
     expect(bad.isError).toBe(true)
     const ok = await call('lma_review', { draft_id: draftId, action: 'approve', operator: 'test-admin' })
     expect(ok.isError).toBe(false)
@@ -126,7 +126,7 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
   })
 
   it('8) 批准后发送入队（非工作时段自动排队）', async () => {
-    const r = await call('lma_send', { draft_id: draftId })
+    const r = await call('lma_send', { draft_id: draftId, operator: 'test-admin' })
     expect(r.isError).toBe(false)
     const s = val(r)
     expect(s.queued).toBeDefined()
@@ -135,7 +135,7 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
   })
 
   it('8b) 重复发送同一草稿被拒绝（幂等）', async () => {
-    const r = await call('lma_send', { draft_id: draftId })
+    const r = await call('lma_send', { draft_id: draftId, operator: 'test-admin' })
     expect(r.isError).toBe(true)
     const text = (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join(' ')
     expect(text).toMatch(/队列中|已发送/)
@@ -153,7 +153,7 @@ describe('完整业务流（导入 → 匹配 → 草稿 → 审核 → 发送�
 
 describe('导出 / 退订 / 跟进（关键合规路径）', () => {
   it('导出 CSV：带 BOM、含状态与业务字段、记录导出日志', async () => {
-    const r = await call('lma_export_csv', { country: 'NL' })
+    const r = await call('lma_export_csv', { country: 'NL', operator: 'test-admin' })
     expect(r.isError).toBe(false)
     const csv = String(r.value)
     expect(csv).toContain('\uFEFF') // BOM 位于 CSV 文本首
@@ -207,5 +207,65 @@ describe('配置与知识库', () => {
     expect(String(r.value)).toMatch(/退订/)
     const ov = await call('lma_project_knowledge', {})
     expect(String(ov.value)).toContain('LMA')
+  })
+})
+
+describe('角色权限（PRD 三、用户角色：admin / staff）', () => {
+  const txt = (r: { content: unknown }) =>
+    (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join(' ')
+
+  it('staff 可导出数据（导出权限 admin 与 staff 均有）', async () => {
+    const r = await call('lma_export_csv', { operator: 'test-staff' })
+    expect(r.isError).toBe(false)
+  })
+
+  it('staff 可审核 / 发送 / 跟进（业务操作）——不被权限层拦截', async () => {
+    // 用不存在的草稿：期望失败原因是"草稿不存在"，而不是权限不足
+    const send = await call('lma_send', { draft_id: 999999, operator: 'test-staff' })
+    expect(send.isError).toBe(true)
+    expect(txt(send)).not.toMatch(/权限/)
+    expect(txt(send)).toMatch(/草稿不存在/)
+
+    const rev = await call('lma_review', { draft_id: 999999, action: 'approve', operator: 'test-staff' })
+    expect(rev.isError).toBe(true)
+    expect(txt(rev)).not.toMatch(/权限/)
+    expect(txt(rev)).toMatch(/草稿不存在/)
+
+    const fu = await call('lma_followup_check', { operator: 'test-staff' })
+    expect(fu.isError).toBe(false)
+  })
+
+  it('staff 不能导入 / 改配置 / 编辑供应商 / 删除供应商 / 加退订（管理员专属）', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['lma_import_confirm', { batch_id: 'x', dedupe_strategy: 'skip', source_note: 'y', operator: 'test-staff' }],
+      ['lma_config_update', { section: 'send_policy', daily_limit: 9, operator: 'test-staff' }],
+      ['lma_supplier_edit', { id: 999999, company_name: 'X', operator: 'test-staff' }],
+      ['lma_supplier_delete', { id: 999999, operator: 'test-staff' }],
+      ['lma_unsubscribe_add', { email: 'staff-check@example.com', operator: 'test-staff' }],
+      ['lma_event_record', { supplier_id: 999999, type: 'replied', operator: 'test-staff' }],
+    ]
+    for (const [tool, args] of cases) {
+      const r = await call(tool, args)
+      expect(r.isError, `${tool} 应拒绝 staff`).toBe(true)
+      expect(txt(r), `${tool} 的错误应说明缺少管理员权限`).toMatch(/管理员/)
+    }
+  })
+
+  it('未列入任何名单的操作者：发送/审核/导出/编辑/退订/跟进一律拒绝', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['lma_send', { draft_id: 999999, operator: 'outsider' }],
+      ['lma_review', { draft_id: 999999, action: 'approve', operator: 'outsider' }],
+      ['lma_export_csv', { operator: 'outsider' }],
+      ['lma_supplier_edit', { id: 999999, company_name: 'X', operator: 'outsider' }],
+      ['lma_supplier_delete', { id: 999999, operator: 'outsider' }],
+      ['lma_unsubscribe_add', { email: 'outsider@example.com', operator: 'outsider' }],
+      ['lma_followup_check', { operator: 'outsider' }],
+      ['lma_config_update', { section: 'send_policy', daily_limit: 9, operator: 'outsider' }],
+    ]
+    for (const [tool, args] of cases) {
+      const r = await call(tool, args)
+      expect(r.isError, `${tool} 应拒绝 outsider`).toBe(true)
+      expect(txt(r), `${tool} 的错误应说明权限`).toMatch(/权限/)
+    }
   })
 })

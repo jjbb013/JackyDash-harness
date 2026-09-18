@@ -15,7 +15,11 @@
 - **退订是回信制**：页脚与 `List-Unsubscribe` 都是 `mailto:`（回复时把 `unsubscribe`/`退订` 写在**主题**里），由 IMAP 关键词识别自动退订；HTTP `/unsubscribe` 端点仅在未配发件地址时兜底。改 `classify()`/`UNSUB_KEYWORDS` 必须同步 `business.spec.ts` 的分类断言。
 - **字段/数据模型**：适配 WCA 导出模板——`emails`/`contacts`/`networks` 分号多值（主邮箱取第一个，其余存 `extra_emails` JSON）、`profile` 长文本、`city` 含邮编存 `region`、`id` 存 `external_id`、`enrolled_since` 直存；`Netherlands` → `NL` → `Europe/Amsterdam`；语言默认 `en`。
 - **我方画像**：Shanghai Transtar International Freight Forwarding Co., Ltd.（2022 年成立；八大服务：清关合规/多式联运/保税智慧仓 5万㎡/集拼/项目物流/门到门/冷链与 ISO TANK/贸易咨询；优势：本土化、100+ 承运商成本、AI TMS、24/7 双语；目标市场 NL/DE/GB/US/AU/SG/FR/BE/IT/ES）。画像在 `db.ts` 默认值，可经 `lma_config_update` 覆盖。
-- **角色模型**：`admin`/`staff` 由 `LMA_ADMINS` 环境变量区分的操作者名单体现（插件运行于 Harness 内，登录由 Harness 负责）。写操作工具（导入/配置/补录事件/跟进/退订处理）校验 `args.operator ∈ LMA_ADMINS`，测试里用 `test-admin`。
+- **角色模型（PRD 三）**：`admin` = `LMA_ADMINS`，`staff` = `LMA_STAFF`（都是逗号分隔的操作者名单，模块加载时读取）。**判定收敛在 `src/roles.ts` 一处**，`tools.ts` 与 `web/api.ts` 共用。
+  - 仅 admin：`lma_import_confirm`（CSV 导入）、`lma_config_update`、`lma_event_record`、`lma_supplier_edit`、`lma_supplier_delete`、`lma_unsubscribe_add`
+  - admin 或 staff：`lma_review`、`lma_send`、`lma_followup_check`、`lma_export_csv`
+  - **新增有权限要求的工具必须调 `requireAdmin` / `requireUser`**（`tools.ts` 里的薄封装），并补 `harness.spec.ts` 的「角色权限」用例。测试里 admin 用 `test-admin`、staff 用 `test-staff`、越权用 `outsider`。
+  - ⚠️ 不在任何名单里的操作者（含默认的 `harness-agent`）写操作会被拒绝——**有权限要求的工具必须显式传 `operator`**。
 - **数据流**：所有外部数据必须经过 `csvpipeline.ts` 的统一管道（映射→校验→规范化→去重→入库→`import_log`），禁止绕过管道直写 `supplier` 表（`lma_supplier_edit` 等白名单字段除外）。
 
 ## 架构地图
@@ -33,7 +37,7 @@ src/index.ts ── openDb(迁移) + seedDefaults + 注册工具 + ctx.effect �
 
 ## 测试
 
-`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **46/46**。
+`pnpm vitest run --config lma-plugin/vitest.config.ts`（mock 模式，无需密钥）。当前基线 **50/50**。
 `tests/harness.spec.ts` 证明插件在 dsh 内可加载可执行（`new Context()` + `ctx.plugin(SystemPrompt)` + `ctx.plugin(ToolRuntime)` + `ctx.tools.register(buildLmaTools(db))` + `ctx.tools.execute(...)`）。
 新增工具必须在此文件登记断言；改导入管道必须跑真实 `wca_netherlands.csv` 夹具用例。
 

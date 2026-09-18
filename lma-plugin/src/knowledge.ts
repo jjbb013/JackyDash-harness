@@ -82,5 +82,9 @@ KPI 以回复率为准（打开率因客户端预加载虚高）。`,
 - profile：我方业务画像（Transtar 八大服务+四大优势+目标市场）
 - email_template：页脚来源声明（{source} 占位）、禁用词、主题/正文上限
 - send_policy：interval_minutes（默认 3）、daily_limit（默认 20）、check_working_hours（默认 true）、work_start/work_end（9/18）、auto_followup（默认 false）、followup_after_days（3）、followup_max（2）
-- 管理员：LMA_ADMINS 环境变量（逗号分隔的操作者名）；无管理员标识时写操作会被拒绝`,
+- 角色权限（PRD 三、用户角色），判定逻辑收敛在 src/roles.ts：
+  · admin（管理员，LMA_ADMINS 环境变量，逗号分隔操作者名）：导入/导出数据、配置、管理账号、维护业务画像、审核、发送、看统计
+  · staff（业务伙伴，LMA_STAFF 环境变量）：查看列表、审核邮件、发送、标记跟进、导出数据
+  · CSV 导入仅 admin；导出 admin 与 staff 均可；不在任何名单里的操作者，写操作一律拒绝
+  · 供应商增删改与退订名单维护为 admin 专属；两种角色共用同一页面，前端按角色控制按钮可见性`,
 }

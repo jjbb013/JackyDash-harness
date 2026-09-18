@@ -82,7 +82,8 @@ pnpm --filter @lma/dsh-plugin run build:client   # tsc → lib/types，tsdown �
 |---|---|---|
 | `LMA_DB_PATH` | `<仓库根>/lma-data/lma.db` | SQLite 路径 |
 | `LMA_DB_BACKUP_DIR` | 空（不备份） | 每日备份目录（保留 14 份） |
-| `LMA_ADMINS` | 空 | 管理员操作者名单（逗号分隔）。**写操作（导入/审核/发送/配置/补录事件/跟进）会校验，非管理员被拒绝** |
+| `LMA_ADMINS` | 空 | **admin** 名单（逗号分隔）。全部权限：导入/导出/配置/账号与画像/审核/发送/统计 |
+| `LMA_STAFF` | 空 | **staff** 名单（逗号分隔）。业务操作：查看列表/审核邮件/发送/标记跟进/导出数据 |
 | `LMA_OPERATOR` | `harness-agent` | 工具未传 operator 时默认审计操作者 |
 | `LMA_BASE_URL` | `http://127.0.0.1:3081` | HTTP 退订端点域名。**仅在未配置发件地址时**作为页脚兜底（默认走回信退订，见 §五）；生产可改 HTTPS 域名反代到 `LMA_HTTP_PORT` |
 | `LMA_HTTP_PORT` | `3081` | 插件内置 Web 服务端口：`/` 仪表盘、`/unsubscribe` 退订端点、`/api/*` JSON API（绑 127.0.0.1，Node 原生 http，零依赖） |
@@ -192,6 +193,34 @@ classify() 命中 → 写入 unsubscribe_list(source='reply_keyword')
 `GET /unsubscribe?e=<email>&t=<hmac>` 仍在（`src/unsubscribe.ts`，常数时间校验 + 幂等写入），
 但只在**未配置 `LMA_MAIL_FROM` / `LMA_SMTP_USER`** 时才会出现在页脚里，作为本地/离线环境的后备路径。
 
+### 5.6 角色与权限（PRD 三、用户角色）
+
+判定逻辑**收敛在 `src/roles.ts` 一处**，`tools.ts`（Agent 工具）与 `web/api.ts`（仪表盘）共用：
+
+| 角色 | 名单来源 | 权限 |
+|---|---|---|
+| **admin** | `LMA_ADMINS` | 全部：导入/导出数据、配置、管理账号、维护业务画像、审核、发送、看统计 |
+| **staff** | `LMA_STAFF` | 业务操作：查看列表、审核邮件、发送、标记跟进、导出数据 |
+
+按工具的落点：
+
+| 工具 | 要求 |
+|---|---|
+| `lma_import_confirm`（CSV 导入） | **仅 admin** |
+| `lma_config_update`（配置/画像） | **仅 admin** |
+| `lma_event_record`（人工补录事件） | **仅 admin** |
+| `lma_supplier_edit` / `lma_supplier_delete` | **仅 admin** |
+| `lma_unsubscribe_add`（退订名单维护） | **仅 admin** |
+| `lma_review`（审核）/ `lma_send`（发送）/ `lma_followup_check`（跟进） | admin 或 staff |
+| `lma_export_csv`（导出） | admin 或 staff |
+| 只读工具（`lma_dashboard`/`lma_suppliers`/…） | 不校验 |
+
+注意事项：
+
+- **不在任何名单里的操作者，写操作一律拒绝**；未显式传 `operator` 时取 `LMA_OPERATOR`（默认 `harness-agent`），**它不在任何名单里，所以有权限要求的工具必须显式传 `operator`**
+- 前端隐藏按钮只是体验，**后端必须强制**（`roles.ts` 就是那道闸）
+- 这是环境变量版的最小落地；接入登录后把 `roles.ts` 改成查 `lma_user` 表（已含 `username`/`password_hash`/`role`/`status`）即可，**调用方不用动**
+
 ## 六、工具清单（模型可调用）
 
 `lma_dashboard` `lma_import_preview` `lma_import_confirm` `lma_import_logs` `lma_export_csv`
@@ -214,7 +243,7 @@ classify() 命中 → 写入 unsubscribe_list(source='reply_keyword')
 pnpm vitest run --config lma-plugin/vitest.config.ts
 ```
 
-当前 **46 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
+当前 **50 项全部通过**（改动退订/发信逻辑后请以此为回归基线）。覆盖：CSV 解析（真实 WCA 荷兰模板 61 条记录（多行引号字段））、字段映射、去重策略、时区推断、AI mock 匹配与草稿硬限制、页脚退订方式（mailto 与 HTTP 兜底两条分支）、退订关键词分类（中文命中 / 引用不误判 / 退信不受影响）、发送队列（退订拦截/节流/事件落库），以及 **Harness 集成**（`new Context()` + SystemPrompt + ToolRuntime 装配，`ctx.tools.execute` 跑通 导入→匹配→草稿→审核→发送→事件 全流程）。
 
 ## 八、部署（1 核 2G 生产）
 

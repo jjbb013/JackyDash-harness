@@ -1,12 +1,13 @@
 // LMA 仪表盘 JSON API：供插件自带 Web 页面（/）调用
-// 写操作（审核/手动退订）校验 X-LMA-Operator ∈ LMA_ADMINS；只读操作无需身份（本服务默认只绑 127.0.0.1）
+// 写操作按 PRD 角色表校验 X-LMA-Operator（审核：admin/staff；手动退订：仅 admin），
+// 统一走 roles.ts 的角色判定；只读操作当前无需身份（本服务默认只绑 127.0.0.1，
+// 部署到 VPS 前必须补上真正的登录鉴权，见 README「部署」章节）。
 import type { Db } from '../db.ts'
 import { getProfile, getEmailTemplate, getSendPolicy } from '../db.ts'
 import { queueSnapshot, todaySentCount } from '../sendqueue.ts'
 import { audit } from '../audit.ts'
 import { isValidEmail, sqlNow } from '../util.ts'
-
-const ADMINS = new Set((process.env.LMA_ADMINS ?? '').split(',').map((s) => s.trim()).filter(Boolean))
+import { requireRole } from '../roles.ts'
 
 export interface ApiResponse { status: number; body: unknown }
 
@@ -80,7 +81,9 @@ function reviewQueue(db: Db, p: URLSearchParams): ApiResponse {
 }
 
 function review(db: Db, operator: string, body: Record<string, unknown>): ApiResponse {
-  if (!ADMINS.has(operator)) return { status: 403, body: { error: `操作者（${operator}）无管理员权限` } }
+  // PRD 角色表：staff 也可以审核邮件
+  const perm = requireRole(operator, ['admin', 'staff'])
+  if (!perm.ok) return { status: 403, body: { error: perm.error } }
   const id = num(String(body.draft_id ?? ''), 0)
   const action = String(body.action ?? '')
   const draft = db.prepare('SELECT * FROM email_draft WHERE id = ?').get(id) as { status: string; supplier_id: number } | undefined
@@ -120,7 +123,9 @@ function unsubscribes(db: Db): ApiResponse {
 }
 
 function unsubscribeAdd(db: Db, operator: string, body: Record<string, unknown>): ApiResponse {
-  if (!ADMINS.has(operator)) return { status: 403, body: { error: `操作者（${operator}）无管理员权限` } }
+  // 退订名单维护为合规动作，PRD 角色表未授予 staff，仅 admin
+  const perm = requireRole(operator, ['admin'])
+  if (!perm.ok) return { status: 403, body: { error: perm.error } }
   const email = String(body.email ?? '').toLowerCase().trim()
   if (!isValidEmail(email)) return { status: 400, body: { error: '邮箱格式错误' } }
   db.prepare('INSERT OR IGNORE INTO unsubscribe_list (email, source, unsubscribed_at, handled_by, note) VALUES (?, ?, ?, ?, ?)')

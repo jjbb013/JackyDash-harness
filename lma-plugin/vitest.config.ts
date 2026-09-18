@@ -18,6 +18,7 @@ export default defineConfig({
   test: {
     env: {
       LMA_ADMINS: 'test-admin',
+      LMA_STAFF: 'test-staff',
       LMA_OPERATOR: 'test-admin',
       LMA_AI_MODE: 'mock',
       LMA_AI_URL: '',
