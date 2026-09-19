@@ -68,7 +68,7 @@ export function dashboardPage(user: PageUser, chatHref = '/'): string {
 <body>
 <header>
   <h1>LMA 物流推广智能体系统</h1>
-  <div class="op"><a class="chat" id="chat" href="${escapeAttr(chatHref)}">聊天工作台 ↗</a><span id="whoami" class="muted"></span><button id="logout" type="button">退出</button></div>
+  <div class="op"><span id="whoami" class="muted"></span><button id="logout" type="button">退出</button></div>
 </header>
 <nav id="tabs"></nav>
 <main id="view"></main>
@@ -76,7 +76,7 @@ export function dashboardPage(user: PageUser, chatHref = '/'): string {
 <script>
 // 第三项是该 tab 所需角色（省略 = 两角色都可见）；后端仍会独立判定
 const TABS = [
-  ['overview', '总览'], ['review', '审核队列'], ['suppliers', '供应商'],
+  ['overview', '总览'], ['assistant', 'AI 助手'], ['review', '审核队列'], ['suppliers', '供应商'],
   ['queue', '发送队列'], ['unsub', '退订名单'], ['config', '配置', 'admin'], ['users', '人员管理', 'admin'],
 ]
 const USER = ${JSON.stringify(user)}
@@ -375,8 +375,52 @@ document.addEventListener('click', async (e) => {
   } catch (err) { toast(err.message, true) }
 })
 
+// ---------- AI 助手 ----------
+const ACHAT = { history: [] }
+async function renderAssistant() {
+  const html = '<div class="card" style="display:flex;flex-direction:column;min-height:520px">' +
+    '<div id="amsgs" style="flex:1;overflow-y:auto;padding:8px">' +
+      ACHAT.history.map((m) =>
+        '<div style="margin:8px 0;max-width:88%' + (m.role === 'user' ? ';margin-left:auto;text-align:right' : '') + '">' +
+          '<div style="display:inline-block;padding:8px 12px;border-radius:8px;background:' + (m.role === 'user' ? '#2563eb;color:#fff' : '#f3f4f6') + ';text-align:left;white-space:pre-wrap;word-break:break-word">' +
+            esc(m.text) +
+          '</div>' +
+          (m.steps && m.steps.length ? '<details style="margin-top:4px"><summary class="muted" style="cursor:pointer;font-size:12px">调用了 ' + m.steps.length + ' 个工具</summary><div style="font-size:12px;color:#374151;text-align:left">' +
+            m.steps.map((s) => '<div style="margin-top:4px"><b>' + esc(s.tool) + '</b><pre style="margin:2px 0;white-space:pre-wrap">'+esc(s.result.slice(0,400))+'</pre></div>').join('') +
+          '</div></details>' : '') +
+        '</div>').join('') +
+    '</div>' +
+    '<div style="display:flex;gap:8px;border-top:1px solid #e5e7eb;padding:8px">' +
+      '<input id="ainput" placeholder="问发送情况、让 AI 分析某客户、生成邮件草稿…" style="flex:1;padding:8px;border:1px solid #d1d5db;border-radius:6px">' +
+      '<button id="asend" class="btn" style="padding:8px 16px">发送</button>' +
+    '</div></div>'
+  $('#view').innerHTML = html
+  const input = $('#ainput')
+  const send = async () => {
+    const text = input.value.trim()
+    if (!text) return
+    input.value = ''
+    ACHAT.history.push({ role: 'user', text })
+    await renderAssistant()
+    $('#amsgs').scrollTop = $('#amsgs').scrollHeight
+    const btn = $('#asend'); btn.disabled = true; btn.textContent = '思考中…'
+    try {
+      const r = await api('api/assistant', { method: 'POST', body: JSON.stringify({ message: text }) })
+      ACHAT.history.push({ role: 'ai', text: r.reply, steps: r.steps })
+    } catch (e) {
+      ACHAT.history.push({ role: 'ai', text: '出错了：' + e.message })
+    } finally {
+      await renderAssistant()
+      $('#amsgs').scrollTop = $('#amsgs').scrollHeight
+    }
+  }
+  $('#asend').onclick = send
+  input.onkeydown = (e) => { if (e.key === 'Enter') send() }
+  input.focus()
+}
+
 // ---------- 框架 ----------
-const RENDER = { overview: renderOverview, review: renderReview, suppliers: renderSuppliers, queue: renderQueue, unsub: renderUnsub, config: renderConfig, users: renderUsers }
+const RENDER = { overview: renderOverview, assistant: renderAssistant, review: renderReview, suppliers: renderSuppliers, queue: renderQueue, unsub: renderUnsub, config: renderConfig, users: renderUsers }
 function renderTabs() {
   $('#tabs').innerHTML = visibleTabs().map(([id, label]) =>
     '<button class="' + (tab === id ? 'active' : '') + '" onclick="switchTab(\\'' + id + '\\')">' + label + '</button>').join('')

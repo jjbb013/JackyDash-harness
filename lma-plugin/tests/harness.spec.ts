@@ -10,6 +10,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { openDb } from '../src/db.ts'
 import { buildLmaTools } from '../src/tools.ts'
+import { toDshTools } from '../src/tools-dsh.ts'
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'wca_netherlands.csv')
 const signal = new AbortController().signal
@@ -46,7 +47,7 @@ beforeAll(async () => {
   ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
-  for (const tool of buildLmaTools(db)) ctx.tools.register(tool)
+  for (const tool of toDshTools(buildLmaTools(db))) ctx.tools.register(tool)
 })
 
 afterAll(() => { fs.rmSync(tmp, { recursive: true, force: true }) })

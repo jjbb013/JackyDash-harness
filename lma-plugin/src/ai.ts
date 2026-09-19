@@ -67,7 +67,7 @@ function extractJson(text: string): Record<string, unknown> | null {
   try { return JSON.parse(m[0]) as Record<string, unknown> } catch { return null }
 }
 
-async function callLlm(ai: AiRuntime, messages: Array<{ role: string; content: string }>, maxTokens = 1200): Promise<string> {
+export async function callLlm(ai: AiRuntime, messages: Array<{ role: string; content: string }>, maxTokens = 1200): Promise<string> {
   const res = await fetch(ai.url + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ai.key}` },

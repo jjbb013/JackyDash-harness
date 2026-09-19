@@ -618,28 +618,28 @@ describe('站点首页登录页与 forward_auth 探针', () => {
     expect(r.headers.get('location')).toBe('/lma/review')
   })
 
-  it('登录后默认落到聊天工作台入口（本机走 3080，反代场景同源）', async () => {
+  it('登录后默认落到仪表盘首页', async () => {
     const r = await postLogin({ username: 'admin1', password: ADMIN_PW })
     expect(r.status).toBe(302)
-    // 测试服务在 127.0.0.1:<随机端口> 上，聊天台按 LMA_CHAT_PORT（测试钉死 3080）换端口
-    expect(r.headers.get('location')).toBe('http://127.0.0.1:3080/')
+    // 独立版仪表盘即主站：无 next 时落到 '/'
+    expect(r.headers.get('location')).toBe('/')
   })
 
   it('next 只认站内绝对路径，挡掉开放跳转', async () => {
     for (const evil of ['//evil.example.com/x', 'https://evil.example.com', 'javascript:alert(1)']) {
       const r = await postLogin({ username: 'admin1', password: ADMIN_PW, next: evil })
       expect(r.status).toBe(302)
-      expect(r.headers.get('location')).toBe('http://127.0.0.1:3080/')
+      expect(r.headers.get('location')).toBe('/')
     }
     // 失败重渲染时也不把非法 next 回填进页面
     const bad = await get('/login?next=%2F%2Fevil.example.com')
     expect(await bad.text()).not.toContain('evil.example.com')
   })
 
-  it('已登录访问 /login：直接交接进工作台；首登未改密则就地改密', async () => {
+  it('已登录访问 /login：直接 302 回仪表盘；首登未改密则就地改密', async () => {
     const again = await get('/login', adminCookie)
     expect(again.status).toBe(302)
-    expect(again.headers.get('location')).toBe('http://127.0.0.1:3080/')
+    expect(again.headers.get('location')).toBe('/')
 
     const form = await get('/login', mustCookie)
     expect(form.status).toBe(200)
@@ -648,9 +648,9 @@ describe('站点首页登录页与 forward_auth 探针', () => {
     expect(html).toContain('api/auth/change-password')
   })
 
-  it('仪表盘页头带"进入聊天工作台"，地址由服务端现取', async () => {
+  it('仪表盘含 AI 助手 tab（独立版不再有聊天工作台入口）', async () => {
     const html = await (await get('/', adminCookie)).text()
-    expect(html).toContain('聊天工作台')
-    expect(html).toContain('href="http://127.0.0.1:3080/"')
+    expect(html).toContain('AI 助手')
+    expect(html).not.toContain('聊天工作台')
   })
 })

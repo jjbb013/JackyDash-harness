@@ -1,18 +1,11 @@
-// 站点入口交接（F-AUTH-05）单元测试：origin 推断、端口换算、开放跳转防护
+// 站点入口（独立版）单元测试：origin 推断、开放跳转防护、登录落点
 //
-// 这些都是"部署形态相关"的纯函数，出错时表现是"登录后跳到一个点不开的地址"，
-// 所以单独钉住。端口用 vitest.config.ts 里钉死的 LMA_CHAT_PORT=3080。
+// 独立版无 dsh 聊天台交接：登录成功直接落地仪表盘 `/`。
+// 端口换算（LMA_CHAT_PORT=3080）保留，仅供 chatOrigin 推断对外地址用。
 import { describe, expect, it } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import {
   CHAT_PORT, requestOrigin, chatOrigin, chatEntryUrl, loginTarget, sanitizeNext,
 } from '../src/web/entry.ts'
-
-/** 造一个只暴露指定服务的假 Context（真 Context 在这里没有别的用途） */
-const fakeCtx = (services: Record<string, unknown>): Context =>
-  ({ get: (name: string) => services[name] }) as unknown as Context
-
-const CONNECTION = { authenticatedUrl: (base: string) => `${base}?token=FAKE-TOKEN` }
 
 describe('requestOrigin', () => {
   it('优先用反代传来的 X-Forwarded-Proto/Host', () => {
@@ -41,34 +34,31 @@ describe('chatOrigin', () => {
   })
 })
 
-describe('chatEntryUrl', () => {
-  it('有 connection 服务时取带一次性 token 的入口', () => {
-    expect(chatEntryUrl(fakeCtx({ connection: CONNECTION }), { host: '127.0.0.1:3081' }))
-      .toBe('http://127.0.0.1:3080/?token=FAKE-TOKEN')
-  })
-
-  it('没有 connection 服务时退化为不带 token 的根地址，不给死链', () => {
-    expect(chatEntryUrl(undefined, { host: '127.0.0.1:3081' })).toBe('http://127.0.0.1:3080/')
-    expect(chatEntryUrl(fakeCtx({}), { host: '127.0.0.1:3081' })).toBe('http://127.0.0.1:3080/')
+describe('chatEntryUrl（独立版：仪表盘即主站）', () => {
+  it('有 Host 时返回 origin 根地址（独立版仪表盘即主站，不换端口）', () => {
+    expect(chatEntryUrl({ host: '127.0.0.1:3081' })).toBe('http://127.0.0.1:3081/')
+    expect(chatEntryUrl({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'lma.example.com' }))
+      .toBe('https://lma.example.com/')
   })
 
   it('拿不到 Host 时退回相对根路径', () => {
-    expect(chatEntryUrl(undefined, {})).toBe('/')
+    expect(chatEntryUrl({})).toBe('/')
   })
 })
 
-describe('loginTarget', () => {
-  const target = loginTarget(fakeCtx({ connection: CONNECTION }), { host: '127.0.0.1:3081' })
+describe('loginTarget（独立版：落地仪表盘，next 须通过开放跳转校验）', () => {
+  const target = loginTarget({ host: '127.0.0.1:3081' })
 
-  it('仪表盘内部路径原样返回（会话 Cookie 就够）', () => {
+  it('站内绝对路径原样落地', () => {
     expect(target('/lma/review')).toBe('/lma/review')
-    expect(target('/lma/')).toBe('/lma/')
+    expect(target('/')).toBe('/')
   })
 
-  it('其余一律走聊天台入口（要一并取到 dsh Cookie）', () => {
-    expect(target('/')).toBe('http://127.0.0.1:3080/?token=FAKE-TOKEN')
-    expect(target(null)).toBe('http://127.0.0.1:3080/?token=FAKE-TOKEN')
-    expect(target('/lmafoo')).toBe('http://127.0.0.1:3080/?token=FAKE-TOKEN')
+  it('无 next 或非法 next 一律回 `/`', () => {
+    expect(target(null)).toBe('/')
+    expect(target('//evil.example.com')).toBe('/')
+    expect(target('https://evil.example.com')).toBe('/')
+    expect(target('lma/x')).toBe('/')
   })
 })
 

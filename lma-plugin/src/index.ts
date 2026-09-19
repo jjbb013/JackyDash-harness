@@ -10,6 +10,7 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { openDb, setConfig, getConfig, TRANSTAR_PROFILE, DEFAULT_EMAIL_TEMPLATE, DEFAULT_SEND_POLICY } from './db.ts'
 import { buildLmaTools } from './tools.ts'
+import { toDshTools } from './tools-dsh.ts'
 import { initQueueState, processDue } from './sendqueue.ts'
 import { startImapPolling } from './imap.ts'
 import { checkFollowups } from './followup.ts'
@@ -73,8 +74,8 @@ export function apply(ctx: Context): void {
   console.log(`[lma] ${agentIdentitySummary(db)}`)
   console.log(`[lma] 运行环境：${envSummary(HTTP_PORT, CHAT_PORT)}`)
 
-  // 注册全部业务工具
-  const lmaTools = buildLmaTools(db)
+  // 注册全部业务工具（ToolSpec → dsh ToolDefinition 桥接）
+  const lmaTools = toDshTools(buildLmaTools(db))
   for (const tool of lmaTools) {
     ctx.tools.register(tool)
   }

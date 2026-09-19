@@ -1,30 +1,17 @@
 {
-  "name": "@lma/dsh-plugin",
-  "version": "1.0.0",
+  "name": "@lma/standalone",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "LMA 物流推广智能体系统 —— DeepSeek Harness 二开插件（工具 + 定时任务 + SQLite + Web 仪表盘）",
+  "description": "LMA 物流推广智能体系统 —— 独立版（Node + SQLite + 内置 AI 助手，无需 DeepSeek Harness）",
   "exports": {
-    "./client": {
-      "types": "./lib/types/client/index.d.ts",
-      "default": "./lib/client.js"
-    },
     "./package.json": "./package.json"
   },
-  "dsh": {
-    "client": {
-      "platform": "web",
-      "inject": [
-        "slots"
-      ]
-    }
-  },
   "scripts": {
+    "start": "node --experimental-strip-types --no-warnings src/main.ts",
     "build:client": "tsc -p tsconfig.client.json && DSH_BUILD_FACE=client tsdown --config tsdown.config.ts"
   },
-  "dependencies": {
-    "@deepseek-ai/dsh-tools": "workspace:*"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/react": "~18.3.1",
     "react": "^18.2.0"

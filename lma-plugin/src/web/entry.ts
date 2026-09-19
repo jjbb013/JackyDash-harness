@@ -1,23 +1,10 @@
-// 「进入聊天工作台」入口：把访客从 LMA 登录会话交接到 dsh 聊天 UI（F-AUTH-05）
+// 站点入口：登录成功后落地仪表盘（独立版无 dsh 聊天台交接）
 //
-// 为什么需要这一步：dsh web 的浏览器鉴权是**一次性 URL token** —— 只有
-// `GET /?token=<token>` 会下发签名 Cookie，之后的请求才认 Cookie；token 只存在于
-// dsh 进程内存里。LMA 插件与 dsh 同进程，可以通过公开服务方法
-// `ctx.connection.authenticatedUrl()` 拿到带 token 的根地址，于是"登录一次 → 直接
-// 进聊天台"不需要任何代理改写，也不需要把 token 写进配置。
-//
-// 拿不到 connection 服务时（非 web profile，或首帧尚未就绪）退化为不带 token 的根
-// 地址：浏览器若已有 dsh 会话 Cookie 仍能进入，否则会看到 dsh 自己的 401 提示，
-// 而不是一个"点不动"的死链。
-import type { Context } from '@deepseek-ai/cordis'
+// 独立版（main.ts）下，仪表盘就是主站：登录成功 → 直接落地 `/`。
+// 本文件保留 origin 推断、next 防开放跳转、页面/接口分流等纯 HTTP 逻辑。
 
 /** 聊天 UI（dsh web）监听端口。本机开发时它与 LMA 端口（默认 3081）不同，故需显式知道。 */
 export const CHAT_PORT = Number(process.env.LMA_CHAT_PORT ?? 3080)
-
-/** dsh 浏览器会话服务：这里只用到"取带一次性 token 的根地址"这一个方法。 */
-interface BrowserConnection {
-  authenticatedUrl(baseUrl: string): string
-}
 
 type Headers = Record<string, string | string[] | undefined>
 
@@ -59,33 +46,21 @@ export function chatOrigin(headers: Headers): string {
 }
 
 /**
- * 带一次性 token 的聊天台入口地址。
- * @param ctx - 插件上下文；可缺省（测试或非 web profile）。
+ * 登录成功后的落地地址（独立版：仪表盘即主站）。
  * @param headers - 入站请求头，用来推断对外 origin。
  * @returns 可直接 302 过去的绝对地址。
  */
-export function chatEntryUrl(ctx: Context | undefined, headers: Headers): string {
-  const origin = chatOrigin(headers)
-  if (!origin) return '/'
-  const connection = ctx === undefined
-    ? undefined
-    : (ctx as unknown as { get(name: string): unknown }).get('connection') as BrowserConnection | undefined
-  if (connection === undefined || typeof connection.authenticatedUrl !== 'function') return `${origin}/`
-  return connection.authenticatedUrl(`${origin}/`)
+export function chatEntryUrl(_headers: Headers): string {
+  const origin = requestOrigin(_headers)
+  return origin ? `${origin}/` : '/'
 }
 
 /**
- * 生成"登录成功后跳哪"的判定函数。
- *
- * 仪表盘内部路径（`/lma/...`）只靠会话 Cookie 就能进，直接回原地址；
- * 其余（含根路径 `/`，即聊天台）一律走带 token 的入口 —— 否则聊天台的
- * `/api` 调用会因为缺少 dsh Cookie 而全部 401。
- * @param ctx - 插件上下文，用于取带 token 的入口地址。
- * @param headers - 入站请求头。
+ * 生成"登录成功后跳哪"的判定函数：有 next（站内路径）用 next，否则落地 `/`。
  * @returns 接受 `next`（可为 null）并返回落点地址的函数。
  */
-export function loginTarget(ctx: Context | undefined, headers: Headers): (next: string | null) => string {
-  return (next) => next !== null && /^\/lma(?:\/|$)/.test(next) ? next : chatEntryUrl(ctx, headers)
+export function loginTarget(_headers: Headers): (next: string | null) => string {
+  return (next) => sanitizeNext(next) ?? '/'
 }
 
 /**

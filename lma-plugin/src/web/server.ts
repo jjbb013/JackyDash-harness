@@ -19,7 +19,6 @@
 //   探 /api/auth/verify。于是"进聊天工作台先过登录页"由反代完成，而 dsh 自己的一次性
 //   token 由 plugin 在登录成功那一刻用 ctx.connection 现取现用（见 entry.ts）。
 import http from 'node:http'
-import type { Context } from '@deepseek-ai/cordis'
 import type { Db } from '../db.ts'
 import { performUnsubscribe } from '../unsubscribe.ts'
 import { handleApi } from './api.ts'
@@ -38,8 +37,6 @@ const MAX_BODY = 1024 * 1024
 export interface WebServerOptions {
   /** 绑定地址：默认 127.0.0.1，只让反向代理访问。 */
   host?: string
-  /** 插件上下文：用来取带一次性 token 的聊天台入口地址（缺省时退化为不带 token 的根地址）。 */
-  ctx?: Context
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -69,7 +66,7 @@ function send(res: http.ServerResponse, r: WebResult): void {
  * @returns http.Server（调用方可 unref/close）。
  */
 export function startWebServer(db: Db, port: number, options: WebServerOptions = {}): http.Server {
-  const { host = '127.0.0.1', ctx } = options
+  const { host = '127.0.0.1' } = options
   const server = http.createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -98,10 +95,10 @@ export function startWebServer(db: Db, port: number, options: WebServerOptions =
       if (url.pathname === '/login' && method === 'GET') {
         const next = sanitizeNext(url.searchParams.get('next'))
         if (user) {
-          // 已登录：首登未改密就地改密（被反代挡回来时不会来回弹），否则直接交接进工作台
+          // 已登录：首登未改密就地改密（被反代挡回来时不会来回弹），否则直接落地仪表盘
           send(res, user.mustChangePassword
-            ? htmlResult(200, changePasswordPage(user, chatEntryUrl(ctx, headers)))
-            : redirectResult(loginTarget(ctx, headers)(next)))
+            ? htmlResult(200, changePasswordPage(user, chatEntryUrl(headers)))
+            : redirectResult(loginTarget(headers)(next)))
           return
         }
         send(res, htmlResult(200, loginPage(undefined, next)))
@@ -109,7 +106,7 @@ export function startWebServer(db: Db, port: number, options: WebServerOptions =
       }
       if (url.pathname === '/api/auth/login' && method === 'POST') {
         const form = new URLSearchParams(await readBody(req))
-        send(res, await handleLogin(db, form, headers, remoteAddr, loginTarget(ctx, headers)))
+        send(res, await handleLogin(db, form, headers, remoteAddr, loginTarget(headers)))
         return
       }
 
@@ -181,9 +178,9 @@ export function startWebServer(db: Db, port: number, options: WebServerOptions =
         return
       }
 
-      // 9) 仪表盘页面（页头带"进入聊天工作台"，用的是现取的带 token 入口）
+      // 9) 仪表盘页面（独立版主站）
       if (method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-        send(res, htmlResult(200, dashboardPage(user, chatEntryUrl(ctx, headers))))
+        send(res, htmlResult(200, dashboardPage(user)))
         return
       }
 

@@ -13,6 +13,7 @@ import { requestSend } from '../sendqueue.ts'
 import { exportSuppliersCsv } from '../exporter.ts'
 import { checkFollowups } from '../followup.ts'
 import { previewImport, confirmImport, auditImport } from '../importing.ts'
+import { runAssistant } from '../assistant.ts'
 
 export interface ApiResponse {
   status: number
@@ -302,6 +303,8 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   // 人员管理（F-AUTH-08）：仅 admin
   '/api/users':        { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/users/update': { methods: ['POST'],       roles: ['admin'] },
+  // AI 助手：两角色可用（工具层权限仍按服务身份校验）
+  '/api/assistant':    { methods: ['POST'], roles: ['admin', 'staff'] },
 }
 
 /** 路由一条 /api/* 请求。未登记路径返回 404；角色不符返回 403（并写审计）。 */
@@ -337,6 +340,22 @@ export async function handleApi(
     case '/api/ai-config':      return method === 'GET' ? aiConfigView(db) : saveAiConfig(db, user, body, ctx)
     case '/api/users':        return method === 'GET' ? listUsers(db) : await createUser(db, user, body, ctx)
     case '/api/users/update': return await updateUser(db, user, body, ctx)
+    case '/api/assistant': {
+      const message = String(body.message ?? '').trim()
+      if (!message) return { status: 400, body: { error: 'message 不能为空' } }
+      try {
+        const result = await runAssistant(db, message)
+        audit(db, user.username, 'assistant.run', 'assistant', null, { message: message.slice(0, 200), steps: result.steps.length }, {
+          ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId, result: 'ok',
+        })
+        return { status: 200, body: result }
+      } catch (e) {
+        audit(db, user.username, 'assistant.run', 'assistant', null, { error: (e as Error).message }, {
+          ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId, result: 'error',
+        })
+        return { status: 502, body: { error: `AI 助手调用失败：${(e as Error).message}` } }
+      }
+    }
   }
   return { status: 404, body: { error: '接口不存在' } }
 }

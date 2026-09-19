@@ -1,0 +1,38 @@
+[Unit]
+Description=LMA 物流推广智能体系统（独立版：Node + SQLite + 内置 AI 助手，仪表盘 :3081）
+Documentation=https://github.com/jjbb013/JackyDash-harness/tree/standalone
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lma
+Group=lma
+WorkingDirectory=/opt/lma/lma-plugin
+
+# 机密与配置集中在 /etc/lma/lma.env（0600 root:root），不要写进 unit 文件
+EnvironmentFile=/etc/lma/lma.env
+
+ExecStart=/usr/bin/env node --experimental-strip-types --no-warnings src/main.ts
+
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# 日志交给 journald（journalctl -u lma）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lma
+
+# ---------- 加固 ----------
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,8 @@
-// LMA 工具集：注册到 ctx.tools，由 Harness Agent 驱动完成全部业务操作
-// 设计要点：结构化返回（output.schema 对象/字符串）+ render 给模型可读文本；
+// LMA 工具集：业务函数层（ToolSpec），同时供两路使用：
+//   1) dsh 插件：经 tools-dsh.ts 包装成 defineTool，注册到 ctx.tools（Harness Agent 驱动）
+//   2) 独立版：assistant.ts 把 ToolSpec 直接转 OpenAI function，内置 AI 助手循环调用
+// 设计要点：结构化返回（JSON 对象/字符串）+ 文本化输出；
 // 写操作（导入/审核/发送/退订/配置）按 PRD 角色模型区分 admin / staff。
-import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Db } from './db.ts'
 import { getProfile, getEmailTemplate, getSendPolicy } from './db.ts'
 import { previewImport, confirmImport, auditImport } from './importing.ts'
@@ -28,41 +29,26 @@ function requireAdmin(db: Db) { return requireRoleOf(db, op(), ['admin']) }
 /** admin 或 staff：审核 / 发送 / 跟进 / 导出等业务操作 */
 function requireUser(db: Db) { return requireRoleOf(db, op(), ['admin', 'staff']) }
 
-// ---------- 轻量文本工具包装 ----------
-interface ToolSpec {
+// ---------- 工具规范（与框架无关的业务函数层）----------
+export interface ToolSpec {
   name: string
   description: string
   parameters: Record<string, { type: 'string' | 'number' | 'boolean'; required?: boolean; description: string; enum?: string[] }>
   execute: (args: Record<string, unknown>) => Promise<unknown> | unknown
 }
 
-function textTool(spec: ToolSpec): ToolDefinition {
-  // 经 defineTool 构造：获得 schema 参数校验 + 输出 schema 校验（官方推荐路径）
-  return defineTool({
-    name: spec.name,
-    description: spec.description,
-    parameters: spec.parameters as never,
-    output: {
-      schema: { type: 'string' } as never,
-      render: (_args, value) => [{ type: 'text', text: String(value) }],
-    },
-    async execute(args) {
-      try {
-        const out = await spec.execute(args as Record<string, unknown>)
-        return (typeof out === 'string' ? out : JSON.stringify(out, null, 2)) as never
-      } catch (e) {
-        throw new Error(`[${spec.name}] ${(e as Error).message}`)
-      }
-    },
-  }) as ToolDefinition
-}
+/**
+ * 透传式文本工具包装：ToolSpec 本身就是业务函数。
+ * dsh 插件形态由 tools-dsh.ts 在此之外套 defineTool；独立版直接消费本结构。
+ */
+function textTool(spec: ToolSpec): ToolSpec { return spec }
 
 const num = (v: unknown, d: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d }
 // 允许 0（用于关闭节流等场景）
 const num0 = (v: unknown, d: number) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d }
 
 // ================= 工具定义 =================
-export function buildLmaTools(db: Db): ToolDefinition[] {
+export function buildLmaTools(db: Db): ToolSpec[] {
   return [
     // ---------- 总览 ----------
     textTool({
