@@ -159,11 +159,26 @@ async function renderSuppliers() {
   if (supQ.q) p.set('q', supQ.q)
   const d = await api('/api/suppliers?' + p)
   const pages = Math.max(1, Math.ceil(d.total / d.size))
+  const isAdmin = USER.role === 'admin'
   const rows = d.rows.map((r) =>
-    '<tr><td>' + r.id + '</td><td>' + esc(r.company_name) + '<br><span class="muted">' + esc(r.contact_name || '') + '</span></td>' +
+    (isAdmin ? '<td><input type="checkbox" class="sup-check" data-id="' + r.id + '"></td>' : '<td></td>') +
+    '<td>' + r.id + '</td><td>' + esc(r.company_name) + '<br><span class="muted">' + esc(r.contact_name || '') + '</span></td>' +
     '<td>' + esc(r.email) + '</td><td>' + esc(r.country || '—') + '</td><td>' + statusTag(r.status) + '</td>' +
-    '<td>' + (r.match_score ?? '—') + '</td><td><a href="javascript:void 0" onclick="toggleDetail(' + r.id + ')">详情</a></td></tr>' +
-    '<tr id="detail-' + r.id + '" style="display:none"><td colspan="7" class="expand"><div class="muted">加载中…</div></td></tr>').join('')
+    '<td>' + (r.match_score ?? '—') + '</td><td style="white-space:nowrap">' +
+    '<a href="javascript:void 0" onclick="toggleDetail(' + r.id + ')">详情</a>' +
+    (isAdmin ? ' <a href="javascript:void 0" onclick="openSupEdit(' + r.id + ')">编辑</a>' +
+      ' <a href="javascript:void 0" onclick="delSup(' + r.id + ')">删除</a>' : '') +
+    '</td></tr>' +
+    '<tr id="detail-' + r.id + '" style="display:none"><td colspan="9" class="expand"><div class="muted">加载中…</div></td></tr>').join('')
+  const batchBar = isAdmin
+    ? '<div class="row2" style="margin-top:8px"><label class="muted"><input type="checkbox" id="sup-all"> 全选本页</label>' +
+      '<select id="batch-field"><option value="">批量编辑字段…</option>' +
+      '<option value="country">国家 country</option><option value="preferred_language">首选语言</option>' +
+      '<option value="status">状态 status</option><option value="region">地区</option></select>' +
+      '<input type="text" id="batch-value" placeholder="新值（如 NL / en / new）">' +
+      '<button class="primary" data-act="batch-apply">批量编辑</button>' +
+      '<button data-act="batch-del">删除所选</button>' +
+      '<span class="muted" id="sup-sel">已选 0 条</span></div>' : ''
   $('#view').innerHTML = '<div class="card">' +
     '<div class="row2"><input type="text" id="f-q" placeholder="关键词" value="' + esc(supQ.q || '') + '">' +
     '<input type="text" id="f-country" placeholder="国家，如 NL" value="' + esc(supQ.country || '') + '" size="8">' +
@@ -174,8 +189,44 @@ async function renderSuppliers() {
     '<span class="muted">共 ' + d.total + ' 条 · 第 ' + d.page + '/' + pages + ' 页</span>' +
     (d.page > 1 ? ' <button onclick="gotoPage(' + (d.page - 1) + ')">上一页</button>' : '') +
     (d.page < pages ? ' <button onclick="gotoPage(' + (d.page + 1) + ')">下一页</button>' : '') + '</div>' +
-    '<table><tr><th>ID</th><th>公司</th><th>邮箱</th><th>国家</th><th>状态</th><th>匹配度</th><th></th></tr>' + rows + '</table></div>' +
+    batchBar +
+    '<table><tr>' + (isAdmin ? '<th></th>' : '') + '<th>ID</th><th>公司</th><th>邮箱</th><th>国家</th><th>状态</th><th>匹配度</th><th>操作</th></tr>' + rows + '</table></div>' +
+    supEditModal() +
     importCard()
+}
+
+// ---------- 供应商编辑 / 删除 ----------
+function supEditModal() {
+  if (USER.role !== 'admin') return ''
+  const fields = [['company_name','公司名称'],['contact_name','联系人'],['email','邮箱'],['phone','电话'],['website','官网'],
+    ['business','主营业务'],['country','国家'],['region','地区/城市'],['preferred_language','首选语言']]
+  return '<div id="sup-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:50;align-items:center;justify-content:center">' +
+    '<div class="card" style="width:600px;max-height:85vh;overflow:auto">' +
+    '<b id="sup-modal-title">编辑供应商</b><p class="muted">修改国家会自动重新推断时区；改邮箱会查重。留空字段 = 清空。</p>' +
+    fields.map(([k, label]) => '<div class="row2" style="margin-top:6px"><span class="muted" style="width:120px">' + label + '</span>' +
+      '<input type="text" id="sup-f-' + k + '" style="flex:1" placeholder="' + label + '"></div>').join('') +
+    '<div style="margin-top:12px"><button class="primary" data-act="sup-save">保存</button> ' +
+    '<button data-act="sup-close">取消</button> <span class="muted" id="sup-msg"></span></div></div></div>'
+}
+window.__supEditId = null
+window.openSupEdit = async (id) => {
+  const d = await api('/api/supplier?id=' + id)
+  window.__supEditId = id
+  $('#sup-modal-title').textContent = '编辑供应商 #' + id + ' · ' + d.supplier.company_name
+  for (const k of ['company_name','contact_name','email','phone','website','business','country','region','preferred_language']) {
+    $('#sup-f-' + k).value = d.supplier[k] || ''
+  }
+  $('#sup-msg').textContent = ''
+  $('#sup-modal').style.display = 'flex'
+}
+window.delSup = async (id) => {
+  if (!confirm('确定删除供应商 #' + id + '？将不再出现在任何列表（软删除，可审计）。')) return
+  const r = await post('api/supplier/delete', { ids: [id] })
+  toast('已删除 ' + r.deleted + ' 条')
+  renderSuppliers()
+}
+function selectedSupIds() {
+  return Array.from(document.querySelectorAll('.sup-check:checked')).map((c) => Number(c.dataset.id))
 }
 
 // ---------- CSV 导入（仅 admin；与 Agent 工具共用同一套管道） ----------
@@ -258,13 +309,55 @@ async function renderConfig() {
     '<div class="row2"><input type="password" id="ai-key" size="26" placeholder="API Key（留空保持不变）">' +
     '<button class="primary" data-act="save-ai">保存</button>' +
     '<button data-act="clear-ai-key">清除 Key</button></div>' +
-    '<div class="muted" id="ai-state"></div></div>'
+    '<div class="muted" id="ai-state"></div></div>' +
+    '<div class="card"><b>SMTP 发信配置</b>' +
+    '<p class="muted">填了服务器与用户名即启用真实发送；留空则回退 log 模式（只记录不真发）。支持 465 SSL / 587 STARTTLS。</p>' +
+    '<div class="row2"><input type="text" id="smtp-host" placeholder="SMTP 服务器，如 smtp.gmail.com">' +
+    '<input type="text" id="smtp-user" placeholder="用户名（邮箱）" style="flex:1"></div>' +
+    '<div class="row2"><input type="number" id="smtp-port" placeholder="465" style="width:90px">' +
+    '<select id="smtp-secure" style="width:130px"><option value="true">SSL（465）</option><option value="false">STARTTLS（587）</option></select>' +
+    '<input type="text" id="smtp-from" placeholder="发件地址 From（留空=用户名）" style="flex:1"></div>' +
+    '<div class="row2"><input type="password" id="smtp-pass" placeholder="密码/授权码（留空保持不变）" style="flex:1">' +
+    '<button class="primary" data-act="save-smtp">保存</button>' +
+    '<button data-act="clear-smtp-pass">清除密码</button></div>' +
+    '<div class="muted" id="smtp-state"></div></div>' +
+    '<div class="card"><b>IMAP 收信配置</b>' +
+    '<p class="muted">启用后每 5 分钟轮询收件箱，自动识别回复 / 退信 / 退订。识别退订关键词会把对方加入退订名单并停止发送。</p>' +
+    '<div class="row2"><label class="muted"><input type="checkbox" id="imap-enabled" style="vertical-align:middle"> 启用 IMAP 轮询</label>' +
+    '<input type="text" id="imap-host" placeholder="IMAP 服务器，如 imap.gmail.com" style="flex:1">' +
+    '<input type="text" id="imap-user" placeholder="用户名（邮箱）" style="flex:1"></div>' +
+    '<div class="row2"><input type="number" id="imap-port" placeholder="993" style="width:90px">' +
+    '<select id="imap-tls" style="width:130px"><option value="true">TLS（993）</option><option value="false">无 TLS</option></select>' +
+    '<input type="password" id="imap-pass" placeholder="密码/授权码（留空保持不变）" style="flex:1">' +
+    '<button class="primary" data-act="save-imap">保存</button>' +
+    '<button data-act="clear-imap-pass">清除密码</button></div>' +
+    '<div class="muted" id="imap-state"></div></div>'
 
   const ai = await api('api/ai-config')
   $('#ai-mode').value = ai.mode
   $('#ai-url').value = ai.url
   $('#ai-model').value = ai.model
   $('#ai-state').textContent = ai.keySet ? ('当前 Key：' + ai.keyMasked) : '当前未设置 Key（api 模式必须设置）'
+
+  const smtp = await api('api/smtp-config')
+  $('#smtp-host').value = smtp.host
+  $('#smtp-user').value = smtp.user
+  $('#smtp-port').value = smtp.port
+  $('#smtp-secure').value = String(smtp.secure)
+  $('#smtp-from').value = smtp.from
+  $('#smtp-state').textContent = smtp.passSet
+    ? ('密码：' + smtp.passMasked + (smtp.envFallback ? '（另有环境变量配置）' : ''))
+    : (smtp.envFallback ? '未在网页设置密码（使用环境变量配置）' : '未设置密码')
+
+  const imap = await api('api/imap-config')
+  $('#imap-enabled').checked = imap.enabled
+  $('#imap-host').value = imap.host
+  $('#imap-user').value = imap.user
+  $('#imap-port').value = imap.port
+  $('#imap-tls').value = String(imap.tls)
+  $('#imap-state').textContent = imap.passSet
+    ? ('密码：' + imap.passMasked + (imap.envFallback ? '（另有环境变量配置）' : ''))
+    : (imap.envFallback ? '未在网页设置密码（使用环境变量配置）' : '未设置密码')
 }
 
 // ---------- 人员管理（仅 admin；无自助注册，账号只能在这里创建） ----------
@@ -365,6 +458,60 @@ document.addEventListener('click', async (e) => {
       await post('api/ai-config', { mode: 'mock', key: '__clear__' })
       toast('已清除 API Key 并切回 mock 模式')
       await renderConfig()
+    } else if (act === 'save-smtp') {
+      const r = await post('api/smtp-config', {
+        host: $('#smtp-host').value, port: $('#smtp-port').value || 465,
+        secure: $('#smtp-secure').value === 'true', user: $('#smtp-user').value,
+        from: $('#smtp-from').value, pass: $('#smtp-pass').value,
+      })
+      toast('SMTP 配置已保存' + (r.host && r.user ? '（将真实发信）' : '（log 模式）'))
+      await renderConfig()
+    } else if (act === 'clear-smtp-pass') {
+      await post('api/smtp-config', { pass: '__clear__' })
+      toast('已清除 SMTP 密码')
+      await renderConfig()
+    } else if (act === 'save-imap') {
+      const r = await post('api/imap-config', {
+        enabled: $('#imap-enabled').checked, host: $('#imap-host').value,
+        port: $('#imap-port').value || 993, tls: $('#imap-tls').value === 'true',
+        user: $('#imap-user').value, pass: $('#imap-pass').value,
+      })
+      toast(r.enabled ? 'IMAP 轮询已启用（每 5 分钟）' : 'IMAP 轮询已关闭')
+      await renderConfig()
+    } else if (act === 'clear-imap-pass') {
+      await post('api/imap-config', { pass: '__clear__' })
+      toast('已清除 IMAP 密码')
+      await renderConfig()
+    } else if (act === 'sup-save') {
+      const id = window.__supEditId
+      if (!id) return
+      const body = { id }
+      for (const k of ['company_name','contact_name','email','phone','website','business','country','region','preferred_language']) {
+        body[k] = $('#sup-f-' + k).value
+      }
+      const r = await post('api/supplier/update', body)
+      $('#sup-modal').style.display = 'none'
+      toast(r.changed ? '已保存 ' + r.changed + ' 处修改' : '没有变化')
+      renderSuppliers()
+    } else if (act === 'sup-close') {
+      $('#sup-modal').style.display = 'none'
+    } else if (act === 'batch-apply') {
+      const ids = selectedSupIds()
+      if (!ids.length) { toast('请先勾选要编辑的供应商', true); return }
+      const field = $('#batch-field').value
+      const value = $('#batch-value').value.trim()
+      if (!field || !value) { toast('请选择字段并填写新值', true); return }
+      if (!confirm('将把 ' + ids.length + ' 条供应商的 ' + field + ' 改为「' + value + '」，继续？')) return
+      const r = await post('api/suppliers/batch-update', { ids, field, value })
+      toast('已更新 ' + r.updated + ' 条')
+      renderSuppliers()
+    } else if (act === 'batch-del') {
+      const ids = selectedSupIds()
+      if (!ids.length) { toast('请先勾选要删除的供应商', true); return }
+      if (!confirm('确定删除所选 ' + ids.length + ' 条供应商？软删除，可审计。')) return
+      const r = await post('api/supplier/delete', { ids })
+      toast('已删除 ' + r.deleted + ' 条')
+      renderSuppliers()
     } else if (act === 'export') {
       const qs = new URLSearchParams()
       if (supQ.country) qs.set('country', supQ.country)
@@ -373,6 +520,16 @@ document.addEventListener('click', async (e) => {
       location.href = 'api/export' + (qs.toString() ? '?' + qs.toString() : '')
     }
   } catch (err) { toast(err.message, true) }
+})
+
+// 供应商页：全选本页 + 已选计数
+document.addEventListener('change', (e) => {
+  const t = e.target
+  if (t && t.id === 'sup-all') {
+    document.querySelectorAll('.sup-check').forEach((c) => { c.checked = t.checked })
+  }
+  const sel = $('#sup-sel')
+  if (sel) sel.textContent = '已选 ' + selectedSupIds().length + ' 条'
 })
 
 // ---------- AI 助手 ----------

@@ -1,0 +1,163 @@
+// 供应商编辑/删除 + SMTP/IMAP 配置端点（F-DATA-08/09、配置页）集成测试
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import type { AddressInfo } from 'node:net'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { openDb } from '../src/db.ts'
+import { hashPassword } from '../src/auth/passwords.ts'
+import { startWebServer } from '../src/web/server.ts'
+
+const pw = (p: string): string => p
+const ADMIN_PW = pw('admin-pw')
+const STAFF_PW = pw('staff-pw')
+
+let tmp: string
+let db: ReturnType<typeof openDb>
+let server: ReturnType<typeof startWebServer>
+let base = ''
+let adminCookie = ''
+let staffCookie = ''
+
+const json = (r: Response) => r.json() as Promise<Record<string, unknown>>
+async function login(username: string, password: string) {
+  const r = await fetch(`${base}/api/auth/login`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username, password }).toString(),
+  })
+  return (r.headers.get('set-cookie') ?? '').split(';')[0]
+}
+const postJson = (p: string, body: unknown, cookie: string) =>
+  fetch(`${base}${p}`, { method: 'POST', redirect: 'manual', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
+function seedSuppliers() {
+  const ins = db.prepare(`INSERT INTO supplier (company_name, contact_name, email, business, country, timezone, preferred_language, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'seed-test')`)
+  ins.run('NL Freight BV', 'Jan', 'jan@nlfreight.nl', 'customs', 'NL', 'Europe/Amsterdam', 'nl')
+  ins.run('NZ Cargo Ltd', 'Sara', 'sara@nzcargo.co.nz', 'ocean', 'NZ', 'Pacific/Auckland', 'en')
+}
+
+beforeAll(async () => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lma-sup-'))
+  db = openDb(path.join(tmp, 'web.db'))
+  const ins = db.prepare('INSERT INTO lma_user (username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?)')
+  ins.run('admin1', await hashPassword(ADMIN_PW), 'admin', 0)
+  ins.run('staff1', await hashPassword(STAFF_PW), 'staff', 0)
+  seedSuppliers()
+  server = startWebServer(db, 0)
+  await new Promise<void>((res) => server.once('listening', () => res()))
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  adminCookie = await login('admin1', ADMIN_PW)
+  staffCookie = await login('staff1', STAFF_PW)
+})
+afterAll(() => { server.close(); fs.rmSync(tmp, { recursive: true, force: true }) })
+
+describe('SMTP / IMAP 配置（仅 admin）', () => {
+  it('staff 访问配置端点 → 403', async () => {
+    for (const p of ['/api/smtp-config', '/api/imap-config']) {
+      const r = await get(p)
+      const g = await fetch(`${base}${p}`, { headers: { cookie: staffCookie } })
+      expect(r.status).toBe(401)
+      expect(g.status).toBe(403)
+    }
+    function get(p: string) { return fetch(`${base}${p}`, { redirect: 'manual' }) }
+  })
+
+  it('admin 保存 SMTP 并回读（密码不回传明文，可 __clear__ 清除）', async () => {
+    const save = await postJson('/api/smtp-config', {
+      host: 'smtp.example.com', port: 587, secure: false, user: 'out@example.com', from: 'Transtar <out@example.com>', pass: 'secret123',
+    }, adminCookie)
+    expect(save.status).toBe(200)
+    const body = await json(save)
+    expect(body.host).toBe('smtp.example.com')
+    expect(body.passSet).toBe(true)
+    expect(JSON.stringify(body)).not.toContain('secret123')
+
+    const view = await json(await fetch(`${base}/api/smtp-config`, { headers: { cookie: adminCookie } }))
+    expect(view.host).toBe('smtp.example.com')
+    expect(view.passMasked).not.toBe('')
+    expect(JSON.stringify(view)).not.toContain('secret123')
+
+    // 留空保存 → 密码不变
+    const keep = await json(await postJson('/api/smtp-config', { host: 'smtp.example.com', user: 'out@example.com' }, adminCookie))
+    expect(keep.passSet).toBe(true)
+
+    // __clear__ → 清除
+    const cleared = await json(await postJson('/api/smtp-config', { pass: '__clear__' }, adminCookie))
+    expect(cleared.passSet).toBe(false)
+  })
+
+  it('SMTP 端口与必填校验', async () => {
+    const bad = await postJson('/api/smtp-config', { port: 99999 }, adminCookie)
+    expect(bad.status).toBe(400)
+    const noUser = await postJson('/api/smtp-config', { host: 'smtp.x.com', user: '' }, adminCookie)
+    expect(noUser.status).toBe(400)
+  })
+
+  it('admin 保存 IMAP 配置；启用必须有 host+user；默认关闭', async () => {
+    const on = await json(await postJson('/api/imap-config', { enabled: true, host: 'imap.example.com', user: 'in@example.com', pass: 'pw123' }, adminCookie))
+    expect(on.ok).toBe(true)
+    const view = await json(await fetch(`${base}/api/imap-config`, { headers: { cookie: adminCookie } }))
+    expect(view.enabled).toBe(true)
+    expect(JSON.stringify(view)).not.toContain('pw123')
+    const missing = await postJson('/api/imap-config', { enabled: true, host: 'imap.x.com', user: '' }, adminCookie)
+    expect(missing.status).toBe(400)
+  })
+})
+
+describe('供应商编辑 / 批量 / 删除（仅 admin）', () => {
+  it('staff 调用编辑接口 → 403', async () => {
+    const r = await postJson('/api/supplier/update', { id: 1, company_name: 'X' }, staffCookie)
+    expect(r.status).toBe(403)
+  })
+
+  it('单条编辑：改国家自动重推时区；改邮箱查重；非法邮箱 400', async () => {
+    const row = db.prepare('SELECT id FROM supplier WHERE email = ?').get('jan@nlfreight.nl') as { id: number }
+    const r = await json(await postJson('/api/supplier/update', { id: row.id, country: 'DE', region: 'Hamburg' }, adminCookie))
+    expect(r.changed).toBeGreaterThan(0)
+    expect(r.changes.country).toEqual({ from: 'NL', to: 'DE' })
+    const after = db.prepare('SELECT country, timezone, region FROM supplier WHERE id = ?').get(row.id) as Record<string, unknown>
+    expect(after.country).toBe('DE')
+    expect(after.timezone).toBe('Europe/Berlin') // countryToTimezone('DE')
+    expect(after.region).toBe('Hamburg')
+
+    const other = db.prepare('SELECT id FROM supplier WHERE email = ?').get('sara@nzcargo.co.nz') as { id: number }
+    const dup = await postJson('/api/supplier/update', { id: row.id, email: 'sara@nzcargo.co.nz' }, adminCookie)
+    expect(dup.status).toBe(409)
+
+    const badEmail = await postJson('/api/supplier/update', { id: row.id, email: 'not-an-email' }, adminCookie)
+    expect(badEmail.status).toBe(400)
+  })
+
+  it('批量编辑：country 批量写时区；status 全校验；ids 上限', async () => {
+    const ids = (db.prepare('SELECT id FROM supplier WHERE deleted_at IS NULL').all() as { id: number }[]).map((r) => r.id)
+    const r = await json(await postJson('/api/suppliers/batch-update', { ids, field: 'country', value: 'NZ' }, adminCookie))
+    expect(r.updated).toBe(ids.length)
+    const tzs = db.prepare('SELECT DISTINCT timezone FROM supplier WHERE deleted_at IS NULL').all() as { timezone: string }[]
+    expect(tzs.length).toBe(1)
+    expect(tzs[0].timezone).toBe('Pacific/Auckland')
+
+    const badStatus = await postJson('/api/suppliers/batch-update', { ids, field: 'status', value: 'nope' }, adminCookie)
+    expect(badStatus.status).toBe(400)
+    const tooMany = await postJson('/api/suppliers/batch-update', { ids: Array.from({ length: 501 }, (_, i) => i + 1), field: 'status', value: 'new' }, adminCookie)
+    expect(tooMany.status).toBe(400)
+  })
+
+  it('软删除：列表不可见、审计留痕、可恢复查询', async () => {
+    const id = (db.prepare('SELECT id FROM supplier WHERE email = ?').get('sara@nzcargo.co.nz') as { id: number }).id
+    const r = await json(await postJson('/api/supplier/delete', { ids: [id] }, adminCookie))
+    expect(r.deleted).toBe(1)
+
+    const list = await json(await fetch(`${base}/api/suppliers`, { headers: { cookie: adminCookie } }))
+    expect(JSON.stringify(list)).not.toContain('sara@nzcargo.co.nz')
+
+    const raw = db.prepare('SELECT deleted_at FROM supplier WHERE id = ?').get(id) as { deleted_at: string | null }
+    expect(raw.deleted_at).not.toBeNull()
+
+    const audit = db.prepare(`SELECT COUNT(*) AS c FROM audit_log WHERE action = 'supplier.delete'`).get() as { c: number }
+    expect(audit.c).toBe(1)
+    const upd = db.prepare(`SELECT COUNT(*) AS c FROM audit_log WHERE action = 'supplier.update'`).get() as { c: number }
+    expect(upd.c).toBeGreaterThan(0)
+  })
+})

@@ -5,12 +5,27 @@ import type { Db } from './db.ts'
 import { sqlNow, extractEmail } from './util.ts'
 import { audit } from './audit.ts'
 
-const IMAP_ENABLED = process.env.LMA_IMAP_ENABLED === 'true'
-const IMAP_HOST = process.env.LMA_IMAP_HOST ?? ''
-const IMAP_PORT = parseInt(process.env.LMA_IMAP_PORT ?? '993', 10)
-const IMAP_TLS = (process.env.LMA_IMAP_TLS ?? 'true') !== 'false'
-const IMAP_USER = process.env.LMA_IMAP_USER ?? ''
-const IMAP_PASS = process.env.LMA_IMAP_PASS ?? ''
+// IMAP 配置解析：优先网页端保存的 db 配置（app_config.imap_config），env 兜底
+import { getImapConfig } from './db.ts'
+
+const ENV_IMAP_ENABLED = process.env.LMA_IMAP_ENABLED === 'true'
+const ENV_IMAP_HOST = process.env.LMA_IMAP_HOST ?? ''
+const ENV_IMAP_PORT = parseInt(process.env.LMA_IMAP_PORT ?? '993', 10)
+const ENV_IMAP_TLS = (process.env.LMA_IMAP_TLS ?? 'true') !== 'false'
+const ENV_IMAP_USER = process.env.LMA_IMAP_USER ?? ''
+const ENV_IMAP_PASS = process.env.LMA_IMAP_PASS ?? ''
+
+function imapOf(db: Db) {
+  const c = getImapConfig(db)
+  return {
+    enabled: c.enabled ?? ENV_IMAP_ENABLED,
+    host: c.host || ENV_IMAP_HOST,
+    port: c.port || ENV_IMAP_PORT,
+    tls: c.tls ?? ENV_IMAP_TLS,
+    user: c.user || ENV_IMAP_USER,
+    pass: c.pass || ENV_IMAP_PASS,
+  }
+}
 
 const BOUNCE_FROM = /(mailer-daemon|postmaster)/i
 const BOUNCE_SUBJ = /(delivery status notification|undeliverable|failed delivery|退回|退信|投递失败)/i
@@ -64,7 +79,8 @@ export function applyResult(db: Db, supplier: { id: number; email: string }, typ
 }
 
 export async function pollOnce(db: Db): Promise<{ skipped: boolean; handled?: number }> {
-  if (!IMAP_ENABLED || !IMAP_HOST || !IMAP_USER) return { skipped: true }
+  const imap = imapOf(db)
+  if (!imap.enabled || !imap.host || !imap.user) return { skipped: true }
 
   let ImapFlow: typeof import('imapflow').ImapFlow
   try {
@@ -83,8 +99,8 @@ export async function pollOnce(db: Db): Promise<{ skipped: boolean; handled?: nu
   }
 
   const client = new ImapFlow({
-    host: IMAP_HOST, port: IMAP_PORT, secure: IMAP_TLS,
-    auth: { user: IMAP_USER, pass: IMAP_PASS }, logger: false,
+    host: imap.host, port: imap.port, secure: imap.tls,
+    auth: { user: imap.user, pass: imap.pass }, logger: false,
     socketTimeout: 120_000, greetingTimeout: 30_000,
   })
   // imapflow 在 socket 超时/断连时会 emit('error')。EventEmitter 上若无人监听 'error'，Node 会把它
@@ -168,11 +184,12 @@ export async function pollOnce(db: Db): Promise<{ skipped: boolean; handled?: nu
 }
 
 export function startImapPolling(db: Db): void {
-  if (!IMAP_ENABLED || !IMAP_HOST || !IMAP_USER) return
+  const imap = imapOf(db)
+  if (!imap.enabled || !imap.host || !imap.user) return
   const INTERVAL = 5 * 60 * 1000 // F-TRACK-01：每 5 分钟
   const tick = () => pollOnce(db).catch((e) => console.error('[lma:imap] tick error', (e as Error).message))
   tick()
   const timer = setInterval(tick, INTERVAL)
   timer.unref?.()
-  console.log(`[lma] IMAP 轮询已启动（每 ${INTERVAL / 60000} 分钟）：${IMAP_USER}@${IMAP_HOST}`)
+  console.log(`[lma] IMAP 轮询已启动（每 ${INTERVAL / 60000} 分钟）：${imap.user}@${imap.host}`)
 }

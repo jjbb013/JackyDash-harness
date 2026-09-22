@@ -3,7 +3,8 @@
 // 每个路由在 ROUTE_ROLES 里显式登记「允许的方法 + 允许的角色」，**未登记即 404、角色不符即 403**
 // （白名单而非黑名单：新增端点忘了登记权限时会直接拒绝，不会默认放行）。
 import type { Db } from '../db.ts'
-import { getProfile, getEmailTemplate, getSendPolicy, getAiConfig, setConfig } from '../db.ts'
+import { getProfile, getEmailTemplate, getSendPolicy, getAiConfig, getSmtpConfig, getImapConfig, setConfig } from '../db.ts'
+import { countryToTimezone } from '../timezone.ts'
 import { queueSnapshot, todaySentCount } from '../sendqueue.ts'
 import { audit } from '../audit.ts'
 import { isValidEmail, sqlNow, maskSecret } from '../util.ts'
@@ -305,6 +306,13 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/users/update': { methods: ['POST'],       roles: ['admin'] },
   // AI 助手：两角色可用（工具层权限仍按服务身份校验）
   '/api/assistant':    { methods: ['POST'], roles: ['admin', 'staff'] },
+  // 邮件收发配置（SMTP/IMAP）：仅 admin（存 app_config，env 兜底）
+  '/api/smtp-config':  { methods: ['GET', 'POST'], roles: ['admin'] },
+  '/api/imap-config':  { methods: ['GET', 'POST'], roles: ['admin'] },
+  // 供应商数据管理（F-DATA-08/09）：编辑/删除/批量编辑 → 仅 admin（PRD 角色表）
+  '/api/supplier/update':   { methods: ['POST'], roles: ['admin'] },
+  '/api/suppliers/batch-update': { methods: ['POST'], roles: ['admin'] },
+  '/api/supplier/delete':   { methods: ['POST'], roles: ['admin'] },
 }
 
 /** 路由一条 /api/* 请求。未登记路径返回 404；角色不符返回 403（并写审计）。 */
@@ -356,6 +364,175 @@ export async function handleApi(
         return { status: 502, body: { error: `AI 助手调用失败：${(e as Error).message}` } }
       }
     }
+
+    case '/api/smtp-config': return method === 'GET' ? smtpConfigView(db) : saveSmtpConfig(db, user, body, ctx)
+    case '/api/imap-config': return method === 'GET' ? imapConfigView(db) : saveImapConfig(db, user, body, ctx)
+    case '/api/supplier/update':     return supplierUpdate(db, user, body, ctx)
+    case '/api/suppliers/batch-update': return supplierBatchUpdate(db, user, body, ctx)
+    case '/api/supplier/delete':     return supplierDelete(db, user, body, ctx)
   }
   return { status: 404, body: { error: '接口不存在' } }
+}
+
+
+// ---------- SMTP / IMAP 配置 ----------
+/** GET /api/smtp-config：不回传密码明文 */
+function smtpConfigView(db: Db): ApiResponse {
+  const c = getSmtpConfig(db)
+  return {
+    status: 200,
+    body: {
+      host: c.host, port: c.port, secure: c.secure, user: c.user, from: c.from,
+      passSet: Boolean(c.pass),
+      passMasked: c.pass ? maskSecret(c.pass) : '',
+      envFallback: Boolean(process.env.LMA_SMTP_HOST || process.env.LMA_SMTP_USER),
+    },
+  }
+}
+
+/** POST /api/smtp-config：保存；pass 不传或留空=保持不变，传 __clear__=清除 */
+function saveSmtpConfig(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const cur = getSmtpConfig(db)
+  const host = String(body.host ?? cur.host).trim()
+  const port = Number(body.port ?? cur.port)
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return { status: 400, body: { error: '端口不合法' } }
+  const user2 = String(body.user ?? cur.user).trim()
+  if (host && !user2) return { status: 400, body: { error: '填写了服务器地址就必须填写用户名' } }
+
+  const passInput = body.pass === undefined ? undefined : String(body.pass)
+  let pass = cur.pass
+  if (passInput === '__clear__') pass = ''
+  else if (passInput && passInput.trim()) pass = passInput.trim()
+
+  const next = {
+    host,
+    port,
+    secure: body.secure === undefined ? cur.secure : Boolean(body.secure),
+    user: user2,
+    pass,
+    from: String(body.from ?? cur.from).trim(),
+  }
+  setConfig(db, 'smtp_config', next, user.username)
+  audit(db, user.username, 'smtp_config_update', 'app_config', null, {
+    host: next.host, port: next.port, user: next.user, passChanged: pass !== cur.pass,
+  }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { ok: true, host: next.host, port: next.port, secure: next.secure, user: next.user, from: next.from, passSet: Boolean(next.pass) } }
+}
+
+/** GET /api/imap-config：不回传密码明文 */
+function imapConfigView(db: Db): ApiResponse {
+  const c = getImapConfig(db)
+  return {
+    status: 200,
+    body: {
+      enabled: c.enabled, host: c.host, port: c.port, tls: c.tls, user: c.user,
+      passSet: Boolean(c.pass),
+      passMasked: c.pass ? maskSecret(c.pass) : '',
+      envFallback: Boolean(process.env.LMA_IMAP_HOST || process.env.LMA_IMAP_USER),
+    },
+  }
+}
+
+/** POST /api/imap-config：保存；pass 不传或留空=保持不变，传 __clear__=清除 */
+function saveImapConfig(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const cur = getImapConfig(db)
+  const host = String(body.host ?? cur.host).trim()
+  const port = Number(body.port ?? cur.port)
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return { status: 400, body: { error: '端口不合法' } }
+  const user2 = String(body.user ?? cur.user).trim()
+  const enabled = body.enabled === undefined ? cur.enabled : Boolean(body.enabled)
+  if (enabled && (!host || !user2)) return { status: 400, body: { error: '启用 IMAP 轮询必须填写服务器地址与用户名' } }
+
+  const passInput = body.pass === undefined ? undefined : String(body.pass)
+  let pass = cur.pass
+  if (passInput === '__clear__') pass = ''
+  else if (passInput && passInput.trim()) pass = passInput.trim()
+
+  const next = { enabled, host, port, tls: body.tls === undefined ? cur.tls : Boolean(body.tls), user: user2, pass }
+  setConfig(db, 'imap_config', next, user.username)
+  audit(db, user.username, 'imap_config_update', 'app_config', null, {
+    enabled: next.enabled, host: next.host, port: next.port, user: next.user, passChanged: pass !== cur.pass,
+  }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { ok: true, enabled: next.enabled, host: next.host, port: next.port, tls: next.tls, user: next.user, passSet: Boolean(next.pass) } }
+}
+
+// ---------- 供应商编辑 / 删除（F-DATA-08/09，软删除） ----------
+/** 单条编辑可写字段；返回实际变更集 */
+const SUPPLIER_EDITABLE = ['company_name', 'contact_name', 'email', 'phone', 'website', 'business', 'country', 'region', 'preferred_language', 'source'] as const
+
+function supplierUpdate(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const id = Number(body.id)
+  if (!Number.isInteger(id) || id <= 0) return { status: 400, body: { error: '缺少有效的供应商 id' } }
+  const row = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(id) as Record<string, unknown> | undefined
+  if (!row) return { status: 404, body: { error: '供应商不存在或已删除' } }
+
+  const sets: string[] = []
+  const args: unknown[] = []
+  const changes: Record<string, { from: unknown; to: unknown }> = {}
+  for (const f of SUPPLIER_EDITABLE) {
+    if (body[f] === undefined) continue
+    let v = String(body[f]).trim()
+    if (f === 'email') {
+      if (!isValidEmail(v)) return { status: 400, body: { error: `邮箱不合法：${v}` } }
+      v = v.toLowerCase()
+    }
+    if (v === String(row[f] ?? '')) continue
+    sets.push(`${f} = ?`); args.push(v)
+    changes[f] = { from: row[f] ?? '', to: v }
+  }
+  if (!sets.length) return { status: 200, body: { ok: true, changed: 0, message: '没有字段发生变化' } }
+
+  // 改国家 → 重新推断时区（与导入管道一致）
+  if (changes.country) {
+    const tz = countryToTimezone(changes.country.to)
+    if (tz) { sets.push('timezone = ?'); args.push(tz.timezone) }
+  }
+  // 改邮箱 → 查重（邮箱 + 公司名模糊匹配，与导入去重一致）
+  if (changes.email) {
+    const dup = db.prepare('SELECT id, company_name FROM supplier WHERE email = ? AND deleted_at IS NULL AND id != ?').get(changes.email.to, id)
+    if (dup) return { status: 409, body: { error: `邮箱 ${changes.email.to} 已被其他供应商（${(dup as { company_name: string }).company_name}）使用` } }
+  }
+
+  sets.push("updated_at = datetime('now')")
+  args.push(id)
+  db.prepare(`UPDATE supplier SET ${sets.join(', ')} WHERE id = ?`).run(...args)
+  audit(db, user.username, 'supplier.update', 'supplier', id, { changes }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { ok: true, changed: Object.keys(changes).length, changes } }
+}
+
+/** 批量编辑公共字段：country / preferred_language / status / source / region */
+function supplierBatchUpdate(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []
+  if (!ids.length || ids.length > 500) return { status: 400, body: { error: 'ids 必须是非空数组（≤500）' } }
+  const field = String(body.field ?? '')
+  const value = String(body.value ?? '').trim()
+  if (!['country', 'preferred_language', 'status', 'source', 'region'].includes(field)) {
+    return { status: 400, body: { error: '批量编辑仅支持字段：country / preferred_language / status / source / region' } }
+  }
+  if (field === 'status' && !['new','matched','drafted','approved','sent','replied','follow_up','unsubscribed','invalid'].includes(value)) {
+    return { status: 400, body: { error: '状态不合法' } }
+  }
+  const placeholders = ids.map(() => '?').join(',')
+  const target = db.prepare(`SELECT COUNT(*) AS c FROM supplier WHERE id IN (${placeholders}) AND deleted_at IS NULL`).get(...ids) as { c: number }
+  if (target.c === 0) return { status: 404, body: { error: '没有找到可更新的供应商' } }
+
+  const sets = [`${field} = ?`, "updated_at = datetime('now')"]
+  const args: unknown[] = [value, ...ids]
+  if (field === 'country') {
+    const tz = countryToTimezone(value)
+    if (tz) { sets.push('timezone = ?'); args.splice(1, 0, tz.timezone) }
+  }
+  db.prepare(`UPDATE supplier SET ${sets.join(', ')} WHERE id IN (${placeholders}) AND deleted_at IS NULL`).run(...args)
+  audit(db, user.username, 'supplier.batch_update', 'supplier', null, { ids, field, value, count: target.c }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { ok: true, updated: target.c, field, value } }
+}
+
+/** 软删除（F-DATA-09）：deleted_at = now；草稿与事件保留（审计留痕） */
+function supplierDelete(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []
+  if (!ids.length || ids.length > 500) return { status: 400, body: { error: 'ids 必须是非空数组（≤500）' } }
+  const placeholders = ids.map(() => '?').join(',')
+  const info = db.prepare(`UPDATE supplier SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id IN (${placeholders}) AND deleted_at IS NULL`).run(...ids)
+  audit(db, user.username, 'supplier.delete', 'supplier', null, { ids, deleted: info.changes }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { ok: true, deleted: info.changes } }
 }

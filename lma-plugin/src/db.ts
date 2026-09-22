@@ -309,6 +309,41 @@ export function getAiConfig(db: Db): AiConfig {
   return { ...DEFAULT_AI_CONFIG, ...getConfig<Partial<AiConfig>>(db, 'ai_config', {}) }
 }
 
+// ---------- SMTP / IMAP 配置（存 app_config；env 仅兜底） ----------
+export interface SmtpConfig {
+  host: string
+  port: number
+  /** true = 465 隐式 TLS（SSL）；false = 587 STARTTLS */
+  secure: boolean
+  user: string
+  pass: string
+  /** 发件地址（From）；留空时退回 user */
+  from: string
+}
+
+export const DEFAULT_SMTP_CONFIG: SmtpConfig = { host: '', port: 465, secure: true, user: '', pass: '', from: '' }
+
+/** SMTP 配置（admin 在网页端「配置」维护；存 app_config 的 smtp_config 键） */
+export function getSmtpConfig(db: Db): SmtpConfig {
+  return { ...DEFAULT_SMTP_CONFIG, ...getConfig<Partial<SmtpConfig>>(db, 'smtp_config', {}) }
+}
+
+export interface ImapConfig {
+  enabled: boolean
+  host: string
+  port: number
+  tls: boolean
+  user: string
+  pass: string
+}
+
+export const DEFAULT_IMAP_CONFIG: ImapConfig = { enabled: false, host: '', port: 993, tls: true, user: '', pass: '' }
+
+/** IMAP 配置（admin 在网页端「配置」维护；存 app_config 的 imap_config 键） */
+export function getImapConfig(db: Db): ImapConfig {
+  return { ...DEFAULT_IMAP_CONFIG, ...getConfig<Partial<ImapConfig>>(db, 'imap_config', {}) }
+}
+
 export function getSendPolicy(db: Db): SendPolicyConfig {
   return { ...DEFAULT_SEND_POLICY, ...getConfig<Partial<SendPolicyConfig>>(db, 'send_policy', {}) }
 }
