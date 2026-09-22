@@ -134,6 +134,20 @@ describe('一键生成邮件草稿（F-AI-03）', () => {
   })
 })
 
+describe('Dashboard 趋势数据（/api/overview.trend）', () => {
+  it('overview 返回最近 14 天趋势（按天聚合事件）', async () => {
+    const r = await fetch(`${base}/api/overview`, { headers: { cookie: adminCookie } })
+    expect(r.status).toBe(200)
+    const d = await json(r)
+    expect(Array.isArray(d.trend)).toBe(true)
+    for (const t of d.trend) {
+      expect(typeof t.day).toBe('string')
+      expect(['sent', 'replied', 'bounced', 'delivered', 'unsubscribed']).toContain(t.event_type)
+      expect(typeof t.c).toBe('number')
+    }
+  })
+})
+
 describe('邮件页脚退订链接域名（公网环境走 LMA_PUBLIC_URL）', () => {
   it('未配置 SMTP 发件地址时，页脚用传入 baseUrl 的退订链接', async () => {
     db.prepare(`UPDATE app_config SET value = ? WHERE key = 'smtp_config'`).run(JSON.stringify({ host: '', port: 465, secure: true, user: '', pass: '', from: '' }))

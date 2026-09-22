@@ -42,6 +42,12 @@ function overview(db: Db): ApiResponse {
       byStatus: db.prepare(`SELECT status, COUNT(*) AS c FROM supplier WHERE deleted_at IS NULL GROUP BY status`).all(),
       byCountry: db.prepare(`SELECT country, COUNT(*) AS c FROM supplier WHERE deleted_at IS NULL AND country IS NOT NULL GROUP BY country ORDER BY c DESC LIMIT 20`).all(),
       pendingReview: one(`SELECT COUNT(*) AS c FROM email_draft WHERE status = 'draft'`),
+      // 最近 14 天事件趋势（按天聚合，供 Dashboard 图表）
+      trend: db.prepare(
+        `SELECT substr(event_time, 1, 10) AS day, event_type, COUNT(*) AS c
+         FROM email_event WHERE event_time >= date('now', '-13 days')
+         GROUP BY day, event_type ORDER BY day`,
+      ).all(),
     },
   }
 }

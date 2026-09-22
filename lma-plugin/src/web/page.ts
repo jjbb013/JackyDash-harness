@@ -112,6 +112,23 @@ function statusTag(s) { return '<span class="tag ' + esc(s) + '">' + esc(s) + '<
 // ---------- 总览 ----------
 async function renderOverview() {
   const d = await api('/api/overview')
+  // 最近 14 天发送趋势（纯 CSS 柱状图，不引第三方库）
+  const trendMap = {}
+  ;(d.trend || []).forEach((t) => { const k = t.day + '|' + t.event_type; trendMap[k] = t.c })
+  const trendDays = []
+  for (let i = 13; i >= 0; i--) {
+    const dt = new Date(Date.now() - i * 86400000)
+    const day = dt.toISOString().slice(0, 10)
+    trendDays.push({ day: dt.toISOString().slice(5, 10), sent: trendMap[day + '|sent'] || 0, replied: trendMap[day + '|replied'] || 0, bounced: trendMap[day + '|bounced'] || 0 })
+  }
+  const trendMax = Math.max(1, ...trendDays.map((t) => t.sent))
+  const trendHtml = '<div class="card" style="margin-top:14px"><b>发送趋势（近 14 天）</b>' +
+    '<div class="trend" style="display:flex;align-items:flex-end;gap:6px;height:110px;margin-top:10px;padding:0 2px;border-bottom:1px solid var(--line)">' +
+    trendDays.map((t) => '<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%">' +
+      '<div title="' + t.day + ' sent:' + t.sent + ' replied:' + t.replied + ' bounced:' + t.bounced + '" style="width:60%;height:' + Math.max(2, Math.round(t.sent / trendMax * 100)) + '%;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px"></div>' +
+      '<span class="muted" style="font-size:10px;margin-top:3px;white-space:nowrap">' + t.day + '</span></div>').join('') +
+    '</div><p class="muted" style="font-size:12px;margin:6px 0 0">柱高 = 当日发送量（峰值 ' + trendMax + ' 封）；悬停查看明细。</p></div>'
+
   const countryRows = d.byCountry.map((r) => '<tr><td>' + esc(r.country) + '</td><td>' + r.c + '</td></tr>').join('')
   const statusRows = d.byStatus.map((r) => '<tr><td>' + statusTag(r.status) + '</td><td>' + r.c + '</td></tr>').join('')
   $('#view').innerHTML =
@@ -122,7 +139,8 @@ async function renderOverview() {
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px" class="ovgrid">' +
     '<div class="card"><b>国家分布</b><table style="margin-top:8px">' + countryRows + '</table></div>' +
     '<div class="card"><b>状态分布</b><table style="margin-top:8px">' + statusRows + '</table></div>' +
-    '</div>'
+    '</div>' +
+    trendHtml
 }
 function stat(v, k) { return '<div class="stat"><div class="v">' + esc(v) + '</div><div class="k">' + esc(k) + '</div></div>' }
 
