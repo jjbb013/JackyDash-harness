@@ -317,6 +317,7 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/imap-config':  { methods: ['GET', 'POST'], roles: ['admin'] },
   // 供应商数据管理（F-DATA-08/09）：编辑/删除/批量编辑 → 仅 admin（PRD 角色表）
   '/api/draft/generate':   { methods: ['POST'], roles: ['admin'] },
+  '/api/draft/generate-batch': { methods: ['POST'], roles: ['admin'] },
   '/api/supplier/update':   { methods: ['POST'], roles: ['admin'] },
   '/api/suppliers/batch-update': { methods: ['POST'], roles: ['admin'] },
   '/api/supplier/delete':   { methods: ['POST'], roles: ['admin'] },
@@ -375,6 +376,7 @@ export async function handleApi(
     case '/api/smtp-config': return method === 'GET' ? smtpConfigView(db) : saveSmtpConfig(db, user, body, ctx)
     case '/api/imap-config': return method === 'GET' ? imapConfigView(db) : saveImapConfig(db, user, body, ctx)
     case '/api/draft/generate':     return await draftGenerate(db, user, body, ctx)
+    case '/api/draft/generate-batch': return await draftGenerateBatch(db, user, body, ctx)
     case '/api/supplier/update':     return supplierUpdate(db, user, body, ctx)
     case '/api/suppliers/batch-update': return supplierBatchUpdate(db, user, body, ctx)
     case '/api/supplier/delete':     return supplierDelete(db, user, body, ctx)
@@ -567,4 +569,34 @@ async function draftGenerate(db: Db, user: SessionUser, body: Record<string, unk
     .run(match.score, match.analysis, id)
   audit(db, user.username, 'create_draft', 'email_draft', Number(info.lastInsertRowid), { supplierId: id }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
   return { status: 200, body: { draft_id: Number(info.lastInsertRowid), subject: draft.subject, body: draft.body, footer_hint: '发送时自动追加来源声明与退订链接' } }
+}
+
+/** POST /api/draft/generate-batch：批量生成草稿（ids ≤ 50，逐个走同一管道） */
+async function draftGenerateBatch(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): Promise<ApiResponse> {
+  const ids = Array.isArray(body.ids) ? body.ids.map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 0) : []
+  if (!ids.length) return { status: 400, body: { error: '缺少有效的 ids' } }
+  if (ids.length > 50) return { status: 400, body: { error: '单次最多 50 个供应商，请分批' } }
+  const results: Array<Record<string, unknown>> = []
+  for (const id of ids) {
+    try {
+      const s = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(id) as Record<string, unknown> | undefined
+      if (!s) { results.push({ supplierId: id, error: '供应商不存在或已删除' }); continue }
+      let match = { score: Number(s.match_score ?? 0), analysis: String(s.match_analysis ?? '') }
+      if (!match.analysis) match = await matchSupplier(db, s as never)
+      const draft = await generateDraft(db, s as never, match, LMA_BASE_URL)
+      const info = db.prepare(
+        `INSERT INTO email_draft (supplier_id, subject, body, language, match_analysis, match_score, status, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, datetime('now'), datetime('now'))`,
+      ).run(id, draft.subject, draft.body, String(s.preferred_language ?? 'en'), match.analysis, match.score, user.username)
+      db.prepare(`UPDATE supplier SET status = 'drafted', match_score = ?, match_analysis = ?, updated_at = datetime('now') WHERE id = ?`)
+        .run(match.score, match.analysis, id)
+      audit(db, user.username, 'create_draft', 'email_draft', Number(info.lastInsertRowid), { supplierId: id, batch: true }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+      results.push({ supplierId: id, draft_id: Number(info.lastInsertRowid), subject: draft.subject })
+    } catch (e) {
+      results.push({ supplierId: id, error: (e as Error).message })
+    }
+  }
+  const ok = results.filter((r) => r.draft_id).length
+  audit(db, user.username, 'create_draft_batch', 'supplier', null, { total: ids.length, ok, failed: results.length - ok }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { total: ids.length, ok, failed: results.length - ok, results } }
 }

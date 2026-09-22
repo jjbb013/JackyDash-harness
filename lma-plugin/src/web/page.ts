@@ -178,6 +178,7 @@ async function renderSuppliers() {
       '<input type="text" id="batch-value" placeholder="新值（如 NL / en / new）">' +
       '<button class="primary" data-act="batch-apply">批量编辑</button>' +
       '<button data-act="batch-del">删除所选</button>' +
+      '<button data-act="batch-draft">批量生成草稿</button>' +
       '<span class="muted" id="sup-sel">已选 0 条</span></div>' : ''
   $('#view').innerHTML = '<div class="card">' +
     '<div class="row2"><input type="text" id="f-q" placeholder="关键词" value="' + esc(supQ.q || '') + '">' +
@@ -223,6 +224,14 @@ window.delSup = async (id) => {
   if (!confirm('确定删除供应商 #' + id + '？将不再出现在任何列表（软删除，可审计）。')) return
   const r = await post('api/supplier/delete', { ids: [id] })
   toast('已删除 ' + r.deleted + ' 条')
+  renderSuppliers()
+}
+window.batchDraft = async () => {
+  const ids = selectedSupIds()
+  if (!ids.length) { toast('请先勾选供应商', true); return }
+  if (!confirm('为选中的 ' + ids.length + ' 个供应商生成邮件草稿？会逐个调用 AI（每个约需数秒）。')) return
+  const r = await post('api/draft/generate-batch', { ids })
+  toast('生成完成：成功 ' + r.ok + ' / 失败 ' + r.failed)
   renderSuppliers()
 }
 function selectedSupIds() {
@@ -514,6 +523,13 @@ document.addEventListener('click', async (e) => {
       if (!confirm('确定删除所选 ' + ids.length + ' 条供应商？软删除，可审计。')) return
       const r = await post('api/supplier/delete', { ids })
       toast('已删除 ' + r.deleted + ' 条')
+      renderSuppliers()
+    } else if (act === 'batch-draft') {
+      const ids = selectedSupIds()
+      if (!ids.length) { toast('请先勾选供应商', true); return }
+      if (!confirm('为选中的 ' + ids.length + ' 个供应商生成邮件草稿？会逐个调用 AI（每个约需数秒）。')) return
+      const r = await post('api/draft/generate-batch', { ids })
+      toast('生成完成：成功 ' + r.ok + ' / 失败 ' + r.failed)
       renderSuppliers()
     } else if (act === 'export') {
       const qs = new URLSearchParams()
