@@ -77,7 +77,7 @@ export function dashboardPage(user: PageUser, chatHref = '/'): string {
 // 第三项是该 tab 所需角色（省略 = 两角色都可见）；后端仍会独立判定
 const TABS = [
   ['overview', '总览'], ['assistant', 'AI 助手'], ['review', '审核队列'], ['suppliers', '供应商'],
-  ['queue', '发送队列'], ['unsub', '退订名单'], ['config', '配置', 'admin'], ['users', '人员管理', 'admin'],
+  ['queue', '发送队列'], ['unsub', '退订名单'], ['config', '配置', 'admin'], ['users', '人员管理', 'admin'], ['audit', '审计日志', 'admin'],
 ]
 const USER = ${JSON.stringify(user)}
 const visibleTabs = () => TABS.filter((t) => !t[2] || t[2] === USER.role)
@@ -274,6 +274,33 @@ async function renderQueue() {
     '<p class="muted">按规则扫描 3 天未回复的已发送供应商并生成跟进草稿（默认只进审核队列，不直接发）。</p>' +
     '<div class="row2"><button class="primary" data-act="followup">执行跟进检查</button></div></div>'
 }
+
+// ---------- 审计日志（admin） ----------
+let auditQ = { page: 1 }
+async function renderAudit() {
+  const p = new URLSearchParams({ page: auditQ.page, size: 50 })
+  if (auditQ.user) p.set('user', auditQ.user)
+  if (auditQ.action) p.set('action', auditQ.action)
+  if (auditQ.q) p.set('q', auditQ.q)
+  const d = await api('/api/audit-logs?' + p)
+  const pages = Math.max(1, Math.ceil(d.total / d.size))
+  const rows = d.rows.map((r) =>
+    '<tr><td>#' + r.id + '</td><td>' + esc(r.username) + '</td><td>' + esc(r.action) + '</td>' +
+    '<td>' + esc(r.object || '—') + (r.object_id ? ' #' + r.object_id : '') + '</td>' +
+    '<td>' + esc(r.detail || '') + '</td><td style="white-space:nowrap">' + fmt(r.created_at) + '</td></tr>').join('')
+  $('#view').innerHTML = '<div class="card"><b>审计日志（' + d.total + '）</b>' +
+    '<div class="row2" style="margin-top:8px"><input type="text" id="a-user" placeholder="操作人" value="' + esc(auditQ.user || '') + '">' +
+    '<input type="text" id="a-action" placeholder="操作类型，如 import / send" value="' + esc(auditQ.action || '') + '">' +
+    '<input type="text" id="a-q" placeholder="详情关键词" value="' + esc(auditQ.q || '') + '">' +
+    '<button class="primary" onclick="searchAudit()">筛选</button>' +
+    '<span class="muted">第 ' + d.page + '/' + pages + ' 页</span>' +
+    (d.page > 1 ? ' <button onclick="auditPage(' + (d.page - 1) + ')">上一页</button>' : '') +
+    (d.page < pages ? ' <button onclick="auditPage(' + (d.page + 1) + ')">下一页</button>' : '') + '</div>' +
+    (d.total ? '<div class="table-wrap"><table><tr><th>ID</th><th>操作人</th><th>类型</th><th>对象</th><th>详情</th><th>时间</th></tr>' + rows + '</table></div>'
+             : '<p class="empty">暂无审计记录</p>') + '</div>'
+}
+window.searchAudit = () => { auditQ = { page: 1, user: $('#a-user').value.trim(), action: $('#a-action').value.trim(), q: $('#a-q').value.trim() }; renderAudit() }
+window.auditPage = (page) => { auditQ.page = page; renderAudit() }
 
 // ---------- 退订名单 ----------
 async function renderUnsub() {
@@ -580,7 +607,7 @@ async function renderAssistant() {
 }
 
 // ---------- 框架 ----------
-const RENDER = { overview: renderOverview, assistant: renderAssistant, review: renderReview, suppliers: renderSuppliers, queue: renderQueue, unsub: renderUnsub, config: renderConfig, users: renderUsers }
+const RENDER = { overview: renderOverview, assistant: renderAssistant, review: renderReview, suppliers: renderSuppliers, queue: renderQueue, unsub: renderUnsub, config: renderConfig, users: renderUsers, audit: renderAudit }
 function renderTabs() {
   $('#tabs').innerHTML = visibleTabs().map(([id, label]) =>
     '<button class="' + (tab === id ? 'active' : '') + '" onclick="switchTab(\\'' + id + '\\')">' + label + '</button>').join('')

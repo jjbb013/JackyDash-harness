@@ -54,6 +54,20 @@ beforeAll(async () => {
 })
 afterAll(() => { server.close(); fs.rmSync(tmp, { recursive: true, force: true }) })
 
+describe('审计日志接口（/api/audit-logs，仅 admin）', () => {
+  it('admin 可读并筛选审计日志；staff 403', async () => {
+    const r = await fetch(`${base}/api/audit-logs?size=10`, { headers: { cookie: adminCookie } })
+    expect(r.status).toBe(200)
+    const d = await json(r)
+    expect(typeof d.total).toBe('number')
+    expect(Array.isArray(d.rows)).toBe(true)
+    const s = await fetch(`${base}/api/audit-logs`, { headers: { cookie: staffCookie } })
+    expect(s.status).toBe(403)
+    const f = await fetch(`${base}/api/audit-logs?action=send`, { headers: { cookie: adminCookie } })
+    expect(f.status).toBe(200)
+  })
+})
+
 describe('SMTP / IMAP 配置（仅 admin）', () => {
   it('staff 访问配置端点 → 403', async () => {
     for (const p of ['/api/smtp-config', '/api/imap-config']) {
