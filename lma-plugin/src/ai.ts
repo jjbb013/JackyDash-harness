@@ -71,16 +71,27 @@ function extractJson(text: string): Record<string, unknown> | null {
   try { return JSON.parse(m[0]) as Record<string, unknown> } catch { return null }
 }
 
-export async function callLlm(ai: AiRuntime, messages: Array<{ role: string; content: string }>, maxTokens = 1200): Promise<string> {
+async function chatOnce(ai: AiRuntime, messages: Array<{ role: string; content: string }>, maxTokens: number): Promise<{ content: string; reasoning: boolean }> {
   const res = await fetch(ai.url + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ai.key}` },
     body: JSON.stringify({ model: ai.model, messages, temperature: 0.4, max_tokens: maxTokens }),
-    signal: AbortSignal.timeout(60_000),
+    signal: AbortSignal.timeout(90_000),
   })
   if (!res.ok) throw new Error(`AI 接口返回 ${res.status}`)
-  const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
-  return data.choices?.[0]?.message?.content ?? ''
+  const data = await res.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
+  const msg = data.choices?.[0]?.message
+  return { content: msg?.content ?? '', reasoning: Boolean(msg?.reasoning_content) }
+}
+
+export async function callLlm(ai: AiRuntime, messages: Array<{ role: string; content: string }>, maxTokens = 1200): Promise<string> {
+  let r = await chatOnce(ai, messages, maxTokens)
+  // 推理模型（如 deepseek-flash/reasoner）把 token 预算花在 reasoning_content 上，
+  // content 可能为空。自动放大预算重试一次，避免"AI 返回格式无法解析"。
+  if (!r.content && r.reasoning) {
+    r = await chatOnce(ai, messages, Math.max(maxTokens * 4, 3200))
+  }
+  return r.content
 }
 
 // ---------- 匹配度评分 + 建议合作切入点（F-AI-02） ----------
@@ -148,7 +159,7 @@ export async function generateDraft(db: Db, supplier: SupplierLike, match: Match
 4. 禁用词：${banned}；5. 必须包含明确 CTA；6. 不得编造我方不存在的服务与数据。只输出 JSON。` },
       { role: 'user', content:
         `我方画像：${JSON.stringify(profile)}\n对方：${supplier.company_name}（${supplier.country ?? '未知'}），主营：${supplier.business ?? '未知'}，网络：${supplier.networks ?? '未知'}，介绍：${(supplier.profile ?? '').slice(0, 500)}。\n匹配度 ${match.score}，分析：${match.analysis}` },
-    ], 800)
+    ], 1600)
     const j = extractJson(content)
     if (j?.subject && j?.body) {
       const subject = String(j.subject).trim().slice(0, tpl.subjectMax)
