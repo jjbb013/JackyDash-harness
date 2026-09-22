@@ -106,6 +106,33 @@ describe('SMTP / IMAP 配置（仅 admin）', () => {
   })
 })
 
+describe('一键生成邮件草稿（F-AI-03）', () => {
+  it('admin 生成草稿：落库 status=draft、供应商状态置 drafted、返回正文含 CTA', async () => {
+    const row = db.prepare('SELECT id FROM supplier WHERE email = ?').get('sara@nzcargo.co.nz') as { id: number }
+    const r = await postJson('/api/draft/generate', { supplier_id: row.id }, adminCookie)
+    expect(r.status).toBe(200)
+    const body = await json(r)
+    expect(body.draft_id).toBeGreaterThan(0)
+    expect(String(body.subject).length).toBeGreaterThan(5)
+    expect(String(body.body)).toMatch(/reply/i) // 必须含 CTA（F-AI-04）
+
+    const d = db.prepare('SELECT status, language FROM email_draft WHERE id = ?').get(body.draft_id) as { status: string; language: string }
+    expect(d.status).toBe('draft')
+    expect(d.language).toBe('en')
+
+    const sup = db.prepare('SELECT status, match_score FROM supplier WHERE id = ?').get(row.id) as { status: string; match_score: number | null }
+    expect(sup.status).toBe('drafted')
+    expect(sup.match_score).toBeGreaterThan(0)
+  })
+
+  it('staff 无权生成；不存在的供应商 404', async () => {
+    const forbidden = await postJson('/api/draft/generate', { supplier_id: 1 }, staffCookie)
+    expect(forbidden.status).toBe(403)
+    const missing = await postJson('/api/draft/generate', { supplier_id: 99999 }, adminCookie)
+    expect(missing.status).toBe(404)
+  })
+})
+
 describe('供应商编辑 / 批量 / 删除（仅 admin）', () => {
   it('staff 调用编辑接口 → 403', async () => {
     const r = await postJson('/api/supplier/update', { id: 1, company_name: 'X' }, staffCookie)

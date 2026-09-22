@@ -62,7 +62,11 @@ export interface SupplierLike {
 }
 
 function extractJson(text: string): Record<string, unknown> | null {
-  const m = String(text).match(/\{[\s\S]*\}/)
+  let t = String(text).trim()
+  // 兼容模型输出 markdown 代码块（```json ... ```）
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fence) t = fence[1].trim()
+  const m = t.match(/\{[\s\S]*\}/)
   if (!m) return null
   try { return JSON.parse(m[0]) as Record<string, unknown> } catch { return null }
 }

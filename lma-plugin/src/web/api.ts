@@ -15,6 +15,7 @@ import { exportSuppliersCsv } from '../exporter.ts'
 import { checkFollowups } from '../followup.ts'
 import { previewImport, confirmImport, auditImport } from '../importing.ts'
 import { runAssistant } from '../assistant.ts'
+import { matchSupplier, generateDraft } from '../ai.ts'
 
 export interface ApiResponse {
   status: number
@@ -310,6 +311,7 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/smtp-config':  { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/imap-config':  { methods: ['GET', 'POST'], roles: ['admin'] },
   // 供应商数据管理（F-DATA-08/09）：编辑/删除/批量编辑 → 仅 admin（PRD 角色表）
+  '/api/draft/generate':   { methods: ['POST'], roles: ['admin'] },
   '/api/supplier/update':   { methods: ['POST'], roles: ['admin'] },
   '/api/suppliers/batch-update': { methods: ['POST'], roles: ['admin'] },
   '/api/supplier/delete':   { methods: ['POST'], roles: ['admin'] },
@@ -367,6 +369,7 @@ export async function handleApi(
 
     case '/api/smtp-config': return method === 'GET' ? smtpConfigView(db) : saveSmtpConfig(db, user, body, ctx)
     case '/api/imap-config': return method === 'GET' ? imapConfigView(db) : saveImapConfig(db, user, body, ctx)
+    case '/api/draft/generate':     return await draftGenerate(db, user, body, ctx)
     case '/api/supplier/update':     return supplierUpdate(db, user, body, ctx)
     case '/api/suppliers/batch-update': return supplierBatchUpdate(db, user, body, ctx)
     case '/api/supplier/delete':     return supplierDelete(db, user, body, ctx)
@@ -535,4 +538,28 @@ function supplierDelete(db: Db, user: SessionUser, body: Record<string, unknown>
   const info = db.prepare(`UPDATE supplier SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id IN (${placeholders}) AND deleted_at IS NULL`).run(...ids)
   audit(db, user.username, 'supplier.delete', 'supplier', null, { ids, deleted: info.changes }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
   return { status: 200, body: { ok: true, deleted: info.changes } }
+}
+
+
+// ---------- 一键生成邮件草稿（F-AI-03；mock / api 均可） ----------
+const LMA_BASE_URL = (process.env.LMA_BASE_URL ?? process.env.LMA_PUBLIC_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
+
+async function draftGenerate(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): Promise<ApiResponse> {
+  const id = Number(body.supplier_id)
+  if (!Number.isInteger(id) || id <= 0) return { status: 400, body: { error: '缺少有效的 supplier_id' } }
+  const s = db.prepare('SELECT * FROM supplier WHERE id = ? AND deleted_at IS NULL').get(id) as Record<string, unknown> | undefined
+  if (!s) return { status: 404, body: { error: '供应商不存在或已删除' } }
+
+  let match = { score: Number(s.match_score ?? 0), analysis: String(s.match_analysis ?? '') }
+  if (!match.analysis) match = await matchSupplier(db, s as never)
+
+  const draft = await generateDraft(db, s as never, match, LMA_BASE_URL)
+  const info = db.prepare(
+    `INSERT INTO email_draft (supplier_id, subject, body, language, match_analysis, match_score, status, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, datetime('now'), datetime('now'))`,
+  ).run(id, draft.subject, draft.body, String(s.preferred_language ?? 'en'), match.analysis, match.score, user.username)
+  db.prepare(`UPDATE supplier SET status = 'drafted', match_score = ?, match_analysis = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(match.score, match.analysis, id)
+  audit(db, user.username, 'create_draft', 'email_draft', Number(info.lastInsertRowid), { supplierId: id }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { draft_id: Number(info.lastInsertRowid), subject: draft.subject, body: draft.body, footer_hint: '发送时自动追加来源声明与退订链接' } }
 }
