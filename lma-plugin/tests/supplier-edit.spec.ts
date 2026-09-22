@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../src/db.ts'
 import { hashPassword } from '../src/auth/passwords.ts'
+import { buildFooter } from '../src/ai.ts'
 import { startWebServer } from '../src/web/server.ts'
 
 const pw = (p: string): string => p
@@ -130,6 +131,16 @@ describe('一键生成邮件草稿（F-AI-03）', () => {
     expect(forbidden.status).toBe(403)
     const missing = await postJson('/api/draft/generate', { supplier_id: 99999 }, adminCookie)
     expect(missing.status).toBe(404)
+  })
+})
+
+describe('邮件页脚退订链接域名（公网环境走 LMA_PUBLIC_URL）', () => {
+  it('buildFooter 在传入公网 baseUrl 时使用 https 域名', async () => {
+    const footer = buildFooter(db, { email: 'x@example.com', company_name: 'X' } as never, 'https://jackydash.will-pan.com')
+    expect(footer).toContain('https://jackydash.will-pan.com/unsubscribe?e=x%40example.com')
+    expect(footer).not.toContain('127.0.0.1')
+    const local = buildFooter(db, { email: 'x@example.com', company_name: 'X' } as never, 'http://127.0.0.1:3081')
+    expect(local).toContain('http://127.0.0.1:3081/unsubscribe')
   })
 })
 

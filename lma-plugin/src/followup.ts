@@ -5,6 +5,7 @@ import { getSendPolicy } from './db.ts'
 import { generateDraft, matchSupplier } from './ai.ts'
 import { enqueue } from './sendqueue.ts'
 import { audit } from './audit.ts'
+import { publicBaseUrl } from './env.ts'
 
 export async function checkFollowups(db: Db, operator: string | null = null): Promise<{ scanned: number; created: number; autoSent: number; autoFollowup: boolean }> {
   const policy = getSendPolicy(db)
@@ -50,5 +51,5 @@ export async function checkFollowups(db: Db, operator: string | null = null): Pr
 }
 
 function baseUrl(): string {
-  return (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
+  return (process.env.LMA_BASE_URL ?? publicBaseUrl(3081)).replace(/\/+$/, '')
 }

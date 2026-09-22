@@ -16,8 +16,9 @@ import { isValidEmail, splitMulti, sqlNow } from './util.ts'
 import { localTimeString, countryToTimezone } from './timezone.ts'
 import { PROJECT_KNOWLEDGE } from './knowledge.ts'
 import { requireRoleOf, agentIdentity } from './roles.ts'
+import { publicBaseUrl } from './env.ts'
 
-const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
+const BASE_URL = (process.env.LMA_BASE_URL ?? publicBaseUrl(3081)).replace(/\/+$/, '')
 
 // ---------- 角色与权限（PRD「三、用户角色」）----------
 // 身份**固定为服务身份**（roles.ts 的 agentIdentity），角色实时取自 lma_user 表。

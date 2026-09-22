@@ -2,6 +2,7 @@
 import type { Db } from './db.ts'
 import { sqlNow } from './util.ts'
 import { buildFooter, unsubscribeToken, type SupplierLike } from './ai.ts'
+import { publicBaseUrl } from './env.ts'
 
 export interface DraftLike {
   id: number
@@ -18,7 +19,7 @@ const ENV_SMTP_SECURE = (process.env.LMA_SMTP_SECURE ?? 'true') !== 'false'
 const ENV_SMTP_USER = process.env.LMA_SMTP_USER ?? ''
 const ENV_SMTP_PASS = process.env.LMA_SMTP_PASS ?? ''
 const ENV_MAIL_FROM = process.env.LMA_MAIL_FROM ?? ''
-const BASE_URL = (process.env.LMA_BASE_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
+const BASE_URL = (process.env.LMA_BASE_URL ?? publicBaseUrl(3081)).replace(/\/+$/, '')
 
 let transport: unknown = null
 let transportFingerprint = ''
