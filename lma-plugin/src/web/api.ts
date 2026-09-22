@@ -221,6 +221,35 @@ function importConfirm(db: Db, user: SessionUser, body: Record<string, unknown>)
   }
 }
 
+/** GET /api/import/failed-csv?batch_id=xxx：下载导入失败行（含标准字段值 + 失败原因，修正后可重导入） */
+function importFailedCsv(db: Db, p: URLSearchParams): ApiResponse {
+  const batchId = p.get('batch_id')?.trim()
+  if (!batchId) return { status: 400, body: { error: '缺少 batch_id' } }
+  const row = db.prepare('SELECT fail_detail FROM import_log WHERE batch_id = ?').get(batchId) as { fail_detail: string } | undefined
+  if (!row) return { status: 404, body: { error: '导入记录不存在' } }
+  let failures: Array<{ row: number; reason: string; data?: Record<string, string> }> = []
+  try { failures = JSON.parse(row.fail_detail ?? '[]') } catch { failures = [] }
+  if (!failures.length) return { status: 404, body: { error: '该批次没有失败行' } }
+
+  const fields = ['company_name', 'contact_name', 'email', 'phone', 'website', 'business', 'country', 'region', 'preferred_language']
+  const escCsv = (v: unknown) => {
+    const t = String(v ?? '')
+    return (t.includes(',') || t.includes('"') || t.includes(String.fromCharCode(10))) ? '"' + t.replace(/\"/g, '""') + '"' : t
+  }
+  const lines = [
+    'row_no,' + fields.join(',') + ',reason',
+    ...failures.map((f) => {
+      const d = f.data || {}
+      return f.row + ',' + fields.map((k) => escCsv(d[k] ?? '')).join(',') + ',' + escCsv(f.reason)
+    }),
+  ]
+  return {
+    status: 200,
+    headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="lma-failed-${batchId}.csv"` },
+    body: '\uFEFF' + lines.join('\r\n'),
+  }
+}
+
 /** GET /api/ai-config：**绝不回传 Key 明文**，只回是否已设置与掩码 */
 function aiConfigView(db: Db): ApiResponse {
   const c = getAiConfig(db)
@@ -306,6 +335,7 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   // CSV 导入与 AI 配置：均为 admin 专属
   '/api/import/preview': { methods: ['POST'], roles: ['admin'] },
   '/api/import/confirm': { methods: ['POST'], roles: ['admin'] },
+  '/api/import/failed-csv': { methods: ['GET'],  roles: ['admin'] },
   '/api/ai-config':      { methods: ['GET', 'POST'], roles: ['admin'] },
   // 人员管理（F-AUTH-08）：仅 admin
   '/api/users':        { methods: ['GET', 'POST'], roles: ['admin'] },
@@ -352,6 +382,7 @@ export async function handleApi(
     case '/api/export':       return exportCsv(db, user, params, ctx)
     case '/api/import/preview': return await importPreview(db, body)
     case '/api/import/confirm': return importConfirm(db, user, body)
+    case '/api/import/failed-csv': return importFailedCsv(db, params)
     case '/api/ai-config':      return method === 'GET' ? aiConfigView(db) : saveAiConfig(db, user, body, ctx)
     case '/api/users':        return method === 'GET' ? listUsers(db) : await createUser(db, user, body, ctx)
     case '/api/users/update': return await updateUser(db, user, body, ctx)

@@ -447,7 +447,8 @@ document.addEventListener('click', async (e) => {
       const r = await post('api/import/confirm', {
         batch_id: window.__impBatch, dedupe_strategy: $('#imp-strategy').value, source_note: $('#imp-source').value,
       })
-      $('#imp-out').innerHTML = '<pre>' + esc(JSON.stringify(r.report, null, 2)) + '</pre>'
+      $('#imp-out').innerHTML = '<pre>' + esc(JSON.stringify(r.report, null, 2)) + '</pre>' +
+        (r.report.failedRows ? '<div style="margin-top:8px"><a class="dl" href="api/import/failed-csv?batch_id=' + encodeURIComponent(window.__impBatch) + '">下载失败行 CSV（修正后重新导入）</a></div>' : '')
       toast('导入完成：成功 ' + r.report.successRows + ' / 失败 ' + r.report.failedRows)
     } else if (act === 'save-ai') {
       const r = await post('api/ai-config', {
