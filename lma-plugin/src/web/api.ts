@@ -230,6 +230,7 @@ function aiConfigView(db: Db): ApiResponse {
       mode: c.mode,
       url: c.url,
       model: c.model,
+      thinking: c.thinking,
       keySet: Boolean(c.key),
       keyMasked: c.key ? maskSecret(c.key) : '',
       envFallback: Boolean(process.env.LMA_AI_URL || process.env.LMA_AI_KEY),
@@ -248,10 +249,14 @@ function saveAiConfig(db: Db, user: SessionUser, body: Record<string, unknown>, 
   if (keyInput === '__clear__') key = ''
   else if (keyInput && keyInput.trim()) key = keyInput.trim()
 
+  const thinking = String(body.thinking ?? cur.thinking)
+  if (!['auto', 'enabled', 'disabled'].includes(thinking)) return { status: 400, body: { error: 'thinking 必须是 auto / enabled / disabled' } }
+
   const next = {
     mode: mode as 'mock' | 'api',
     url: String(body.url ?? cur.url).trim().replace(/\/+$/, ''),
     model: String(body.model ?? cur.model).trim() || 'deepseek-chat',
+    thinking: thinking as 'auto' | 'enabled' | 'disabled',
     key,
   }
   if (next.mode === 'api' && (!next.url || !next.key)) {
@@ -265,7 +270,7 @@ function saveAiConfig(db: Db, user: SessionUser, body: Record<string, unknown>, 
 
   return {
     status: 200,
-    body: { ok: true, mode: next.mode, url: next.url, model: next.model, keySet: Boolean(next.key), keyMasked: next.key ? maskSecret(next.key) : '' },
+    body: { ok: true, mode: next.mode, url: next.url, model: next.model, thinking: next.thinking, keySet: Boolean(next.key), keyMasked: next.key ? maskSecret(next.key) : '' },
   }
 }
 

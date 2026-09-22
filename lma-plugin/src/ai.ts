@@ -9,6 +9,7 @@ export interface AiRuntime {
   url: string
   key: string
   model: string
+  thinking: 'auto' | 'enabled' | 'disabled'
 }
 
 /**
@@ -24,6 +25,8 @@ export function resolveAi(db: Db): AiRuntime {
       url: (process.env.LMA_AI_URL ?? process.env.AI_API_URL ?? '').replace(/\/+$/, ''),
       key: process.env.LMA_AI_KEY ?? process.env.AI_API_KEY ?? '',
       model: process.env.LMA_AI_MODEL ?? 'deepseek-chat',
+      thinking: ((process.env.LMA_AI_THINKING ?? 'auto') === 'enabled' || (process.env.LMA_AI_THINKING ?? 'auto') === 'disabled')
+        ? process.env.LMA_AI_THINKING as 'enabled' | 'disabled' : 'auto',
     }
   }
   return {
@@ -31,7 +34,15 @@ export function resolveAi(db: Db): AiRuntime {
     url: String(saved.url ?? '').replace(/\/+$/, ''),
     key: String(saved.key ?? ''),
     model: String(saved.model || 'deepseek-chat'),
+    thinking: ['enabled', 'disabled'].includes(String(saved.thinking)) ? saved.thinking as 'enabled' | 'disabled' : 'auto',
   }
+}
+
+/** 思考模式对应的请求体附加字段（Agnes 等推理模型；OpenAI 兼容端点忽略即可） */
+export function thinkingPayload(ai: AiRuntime): Record<string, unknown> | undefined {
+  if (ai.thinking === 'enabled') return { thinking: { type: 'enabled', budget_tokens: 2048 } }
+  if (ai.thinking === 'disabled') return { thinking: { type: 'disabled' } }
+  return undefined
 }
 
 export function unsubscribeToken(email: string): string {
@@ -75,7 +86,7 @@ async function chatOnce(ai: AiRuntime, messages: Array<{ role: string; content: 
   const res = await fetch(ai.url + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ai.key}` },
-    body: JSON.stringify({ model: ai.model, messages, temperature: 0.4, max_tokens: maxTokens }),
+    body: JSON.stringify({ model: ai.model, messages, temperature: 0.4, max_tokens: maxTokens, ...thinkingPayload(ai) }),
     signal: AbortSignal.timeout(90_000),
   })
   if (!res.ok) throw new Error(`AI 接口返回 ${res.status}`)

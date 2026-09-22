@@ -300,9 +300,11 @@ export interface AiConfig {
   /** API Key（存在本地 SQLite，请确保库文件权限 0600；接口永不回传明文） */
   key: string
   model: string
+  /** 思考模式：auto=不传（模型默认）；enabled=开启思考；disabled=关闭思考（如 Agnes 的 thinking:{type:disabled}） */
+  thinking: 'auto' | 'enabled' | 'disabled'
 }
 
-export const DEFAULT_AI_CONFIG: AiConfig = { mode: 'mock', url: '', key: '', model: 'deepseek-chat' }
+export const DEFAULT_AI_CONFIG: AiConfig = { mode: 'mock', url: '', key: '', model: 'deepseek-chat', thinking: 'auto' }
 
 /** AI 配置（admin 可在网页端修改；存 app_config 的 ai_config 键） */
 export function getAiConfig(db: Db): AiConfig {

@@ -305,7 +305,8 @@ async function renderConfig() {
     '<p class="muted">支持 DeepSeek 与任意 OpenAI 兼容端点（代码会拼 /chat/completions）。mock 为离线规则，不调用任何外部接口。</p>' +
     '<div class="row2"><select id="ai-mode"><option value="mock">mock（离线规则）</option><option value="api">api（调用端点）</option></select>' +
     '<input type="text" id="ai-url" size="32" placeholder="https://api.deepseek.com/v1">' +
-    '<input type="text" id="ai-model" size="15" placeholder="deepseek-chat"></div>' +
+    '<input type="text" id="ai-model" size="15" placeholder="deepseek-chat">' +
+    '<select id="ai-thinking" style="width:150px"><option value="auto">思考：auto</option><option value="disabled">思考：关闭</option><option value="enabled">思考：开启</option></select></div>' +
     '<div class="row2"><input type="password" id="ai-key" size="26" placeholder="API Key（留空保持不变）">' +
     '<button class="primary" data-act="save-ai">保存</button>' +
     '<button data-act="clear-ai-key">清除 Key</button></div>' +
@@ -337,6 +338,7 @@ async function renderConfig() {
   $('#ai-mode').value = ai.mode
   $('#ai-url').value = ai.url
   $('#ai-model').value = ai.model
+  $('#ai-thinking').value = ai.thinking || 'auto'
   $('#ai-state').textContent = ai.keySet ? ('当前 Key：' + ai.keyMasked) : '当前未设置 Key（api 模式必须设置）'
 
   const smtp = await api('api/smtp-config')
@@ -449,7 +451,8 @@ document.addEventListener('click', async (e) => {
       toast('导入完成：成功 ' + r.report.successRows + ' / 失败 ' + r.report.failedRows)
     } else if (act === 'save-ai') {
       const r = await post('api/ai-config', {
-        mode: $('#ai-mode').value, url: $('#ai-url').value, model: $('#ai-model').value, key: $('#ai-key').value,
+        mode: $('#ai-mode').value, url: $('#ai-url').value, model: $('#ai-model').value,
+        thinking: $('#ai-thinking').value, key: $('#ai-key').value,
       })
       toast('AI 配置已保存（' + r.mode + '）')
       await renderConfig()

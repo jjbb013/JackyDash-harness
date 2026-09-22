@@ -133,6 +133,19 @@ describe('一键生成邮件草稿（F-AI-03）', () => {
   })
 })
 
+describe('AI 配置 thinking 模式', () => {
+  it('保存 thinking=disabled 并回读；非法值 400', async () => {
+    const save = await postJson('/api/ai-config', { mode: 'api', url: 'https://example.com/v1', key: 'fake-test-key', thinking: 'disabled' }, adminCookie)
+    expect(save.status).toBe(200)
+    const body = await json(save)
+    expect(body.thinking).toBe('disabled')
+    const view = await json(await fetch(`${base}/api/ai-config`, { headers: { cookie: adminCookie } }))
+    expect(view.thinking).toBe('disabled')
+    const bad = await postJson('/api/ai-config', { thinking: 'nope' }, adminCookie)
+    expect(bad.status).toBe(400)
+  })
+})
+
 describe('供应商编辑 / 批量 / 删除（仅 admin）', () => {
   it('staff 调用编辑接口 → 403', async () => {
     const r = await postJson('/api/supplier/update', { id: 1, company_name: 'X' }, staffCookie)

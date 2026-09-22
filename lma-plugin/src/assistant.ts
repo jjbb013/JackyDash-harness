@@ -7,7 +7,7 @@
 // mock 模式（未配 AI Key）下不调外部接口，提示先去「配置」页填写端点。
 import type { Db } from './db.ts'
 import { buildLmaTools, type ToolSpec } from './tools.ts'
-import { resolveAi, callLlm } from './ai.ts'
+import { resolveAi, callLlm, thinkingPayload } from './ai.ts'
 import { PROJECT_KNOWLEDGE } from './knowledge.ts'
 
 const MAX_ROUNDS = 8
@@ -108,6 +108,7 @@ export async function runAssistant(db: Db, userMessage: string): Promise<Assista
         tool_choice: 'auto',
         temperature: 0.3,
         max_tokens: 1200,
+        ...thinkingPayload(ai),
       }),
       signal: AbortSignal.timeout(90_000),
     })
