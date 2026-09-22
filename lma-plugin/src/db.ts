@@ -267,7 +267,7 @@ export const TRANSTAR_PROFILE: ProfileConfig = {
 export const DEFAULT_EMAIL_TEMPLATE: EmailTemplateConfig = {
   footerSource:
     'You are receiving this email because your company was identified as a potential business partner (source: {source}). If you prefer not to receive further messages, please unsubscribe.',
-  bannedWords: ['guarantee', '100%', 'free', 'cheapest', 'no.1', 'best', '促销', '免费', '最低价'],
+  bannedWords: ['guarantee', '100%', 'free', 'cheapest', 'no.1', 'best price', 'best rates', 'best offer', '促销', '免费', '最低价'],
   subjectMax: 80,
   bodyMaxWords: 250,
   ctaHint: '邮件必须包含一个明确 CTA（如：回复本邮件 / 预约 15 分钟沟通）',
