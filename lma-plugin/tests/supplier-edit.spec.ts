@@ -135,12 +135,30 @@ describe('一键生成邮件草稿（F-AI-03）', () => {
 })
 
 describe('邮件页脚退订链接域名（公网环境走 LMA_PUBLIC_URL）', () => {
-  it('buildFooter 在传入公网 baseUrl 时使用 https 域名', async () => {
-    const footer = buildFooter(db, { email: 'x@example.com', company_name: 'X' } as never, 'https://jackydash.will-pan.com')
-    expect(footer).toContain('https://jackydash.will-pan.com/unsubscribe?e=x%40example.com')
-    expect(footer).not.toContain('127.0.0.1')
-    const local = buildFooter(db, { email: 'x@example.com', company_name: 'X' } as never, 'http://127.0.0.1:3081')
-    expect(local).toContain('http://127.0.0.1:3081/unsubscribe')
+  it('未配置 SMTP 发件地址时，页脚用传入 baseUrl 的退订链接', async () => {
+    db.prepare(`UPDATE app_config SET value = ? WHERE key = 'smtp_config'`).run(JSON.stringify({ host: '', port: 465, secure: true, user: '', pass: '', from: '' }))
+    try {
+      const footer = buildFooter(db, { email: 'x@example.com', company_name: 'X' } as never, 'https://jackydash.will-pan.com')
+      expect(footer).toContain('https://jackydash.will-pan.com/unsubscribe?e=x%40example.com')
+      expect(footer).not.toContain('127.0.0.1')
+      const local = buildFooter(db, { email: 'x@example.com', company_name: 'X' } as never, 'http://127.0.0.1:3081')
+      expect(local).toContain('http://127.0.0.1:3081/unsubscribe')
+    } finally {
+      db.prepare(`UPDATE app_config SET value = ? WHERE key = 'smtp_config'`).run(JSON.stringify({ host: '', port: 465, secure: true, user: '', pass: '', from: '' }))
+    }
+  })
+
+  it('配置了 SMTP 发件地址时，页脚走 mailto 回信退订、不暴露 baseUrl', async () => {
+    db.prepare(`INSERT INTO app_config (key, value) VALUES ('smtp_config', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify({ host: 'smtp.example.com', port: 465, secure: true, user: 'sender@example.com', pass: 'x', from: 'sender@example.com' }))
+    try {
+      const footer = buildFooter(db, { email: 'x@example.com', company_name: 'X' } as never, 'https://jackydash.will-pan.com')
+      expect(footer).toContain('mailto:sender@example.com?subject=Unsubscribe')
+      expect(footer).not.toContain('jackydash.will-pan.com')
+      expect(footer).not.toContain('/unsubscribe?e=')
+    } finally {
+      db.prepare(`UPDATE app_config SET value = ? WHERE key = 'smtp_config'`).run(JSON.stringify({ host: '', port: 465, secure: true, user: '', pass: '', from: '' }))
+    }
   })
 })
 
