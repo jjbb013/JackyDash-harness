@@ -8,6 +8,8 @@ import { openDb } from '../src/db.ts'
 import { hashPassword } from '../src/auth/passwords.ts'
 import { buildFooter } from '../src/ai.ts'
 import { buildBackupXlsx, backupSummary, shouldRunBackup, DEFAULT_BACKUP_CONFIG } from '../src/backup.ts'
+import { readSoul, appendSoul, writeSoul, parseSoul } from '../src/soul.ts'
+import { parseSoulRules } from '../src/ai.ts'
 import { startWebServer } from '../src/web/server.ts'
 
 const pw = (p: string): string => p
@@ -200,6 +202,38 @@ describe('业务画像 / 模板 / 发送策略编辑（/api/config POST，仅 ad
     expect(d.email_template.bannedWords).toEqual(['free', 'cheap'])
     expect(d.send_policy.intervalMinutes).toBe(5)
     expect(d.send_policy.autoFollowup).toBe(true)
+  })
+})
+
+describe('Soul 长期记忆（本地 soul.md + 接口，仅 admin）', () => {
+  it('soul 文件读写/追加/清空/解析', () => {
+    expect(readSoul(db)).toContain('# LMA Soul')
+    appendSoul(db, { type: 'reject', at: '2026-09-23', text: '禁止使用感叹号结尾' })
+    appendSoul(db, { type: 'chat', at: '2026-09-23', text: '落款用公司全称' })
+    const t = readSoul(db)
+    expect(t).toContain('禁止使用感叹号结尾')
+    expect(t).toContain('落款用公司全称')
+    const entries = parseSoul(t)
+    expect(entries.length).toBe(2)
+    expect(entries[0].type).toBe('reject')
+    expect(parseSoulRules(t)).toContain('- [2026-09-23]')
+    writeSoul(db, '')
+    expect(readSoul(db).includes('感叹号结尾')).toBe(false)
+  })
+
+  it('接口：staff 403；admin 保存/清空', async () => {
+    const denied = await fetch(`${base}/api/soul`, { headers: { cookie: staffCookie } })
+    expect(denied.status).toBe(403)
+    const save = await fetch(`${base}/api/soul`, { method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '# LMA Soul\n\n- [2026-09-23]（手工）永远用英文落款' }) })
+    expect(save.status).toBe(200)
+    const view = await fetch(`${base}/api/soul`, { headers: { cookie: adminCookie } })
+    const d = (await view.json()) as { text: string; entries: Array<{ text: string }> }
+    expect(d.text).toContain('永远用英文落款')
+    expect(d.entries.length).toBeGreaterThanOrEqual(1)
+    const clear = await fetch(`${base}/api/soul`, { method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'clear' }) })
+    expect(clear.status).toBe(200)
   })
 })
 

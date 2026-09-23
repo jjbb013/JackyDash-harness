@@ -4,6 +4,8 @@
 // （白名单而非黑名单：新增端点忘了登记权限时会直接拒绝，不会默认放行）。
 import type { Db } from '../db.ts'
 import { getProfile, getEmailTemplate, getSendPolicy, getAiConfig, getSmtpConfig, getImapConfig, setConfig } from '../db.ts'
+import { readSoul, writeSoul, appendSoul, parseSoul } from '../soul.ts'
+import { extractSoulEntry } from '../ai.ts'
 import { countryToTimezone } from '../timezone.ts'
 import { queueSnapshot, todaySentCount } from '../sendqueue.ts'
 import { audit } from '../audit.ts'
@@ -131,6 +133,10 @@ function review(db: Db, user: SessionUser, body: Record<string, unknown>): ApiRe
     db.prepare(`UPDATE email_draft SET status = 'rejected', reject_reason = ?, reviewer = ?, reviewed_at = datetime('now') WHERE id = ?`).run(reason, operator, id)
     db.prepare(`UPDATE supplier SET status = 'matched', updated_at = datetime('now') WHERE id = ?`).run(draft.supplier_id)
     audit(db, operator, 'review_reject', 'email_draft', id, { reason, via: 'web' })
+    // soul 记忆：把驳回原因提炼为长期规则并落盘（异步，失败不阻断审核）
+    void extractSoulEntry(db, `邮件草稿被驳回。驳回原因：${reason}`).then((rule) => {
+      if (rule) appendSoul(db, { type: 'reject', at: new Date().toISOString().slice(0, 10), text: rule })
+    }).catch(() => {})
     return { status: 200, body: { ok: true, status: 'rejected' } }
   }
   if (action === 'approve') {
@@ -305,6 +311,25 @@ async function backupSendNow(db: Db, user: SessionUser): Promise<ApiResponse> {
   }
 }
 
+/** GET /api/soul：读取长期记忆（soul 文件）与条目列表；POST 保存/清空（仅 admin） */
+function soulView(db: Db): ApiResponse {
+  const text = readSoul(db)
+  return { status: 200, body: { text, entries: parseSoul(text).slice(-50).reverse() } }
+}
+function soulSave(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const action = String(body.action ?? '')
+  if (action === 'clear') {
+    writeSoul(db, '')
+    audit(db, user.username, 'soul_clear', 'soul', null, {}, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+    return { status: 200, body: { ok: true } }
+  }
+  const text = String(body.text ?? '').trim()
+  if (!text) return { status: 400, body: { error: '内容不能为空' } }
+  writeSoul(db, text)
+  audit(db, user.username, 'soul_update', 'soul', null, { chars: text.length }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { ok: true } }
+}
+
 /** GET /api/ai-config：**绝不回传 Key 明文**，只回是否已设置与掩码 */
 function aiConfigView(db: Db): ApiResponse {
   const c = getAiConfig(db)
@@ -468,6 +493,7 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/ai-config':      { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/backup-config':  { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/backup/send-now':{ methods: ['POST'],          roles: ['admin'] },
+  '/api/soul':           { methods: ['GET', 'POST'], roles: ['admin'] },
   // 人员管理（F-AUTH-08）：仅 admin
   '/api/users':        { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/users/update': { methods: ['POST'],       roles: ['admin'] },
@@ -539,6 +565,7 @@ export async function handleApi(
     case '/api/smtp-config': return method === 'GET' ? smtpConfigView(db) : saveSmtpConfig(db, user, body, ctx)
     case '/api/backup-config': return method === 'GET' ? backupConfigView(db) : saveBackupConfigCtl(db, user, body)
     case '/api/backup/send-now': return backupSendNow(db, user)
+    case '/api/soul': return method === 'GET' ? soulView(db) : soulSave(db, user, body, ctx)
     case '/api/imap-config': return method === 'GET' ? imapConfigView(db) : saveImapConfig(db, user, body, ctx)
     case '/api/draft/generate':     return await draftGenerate(db, user, body, ctx)
     case '/api/draft/generate-batch': return await draftGenerateBatch(db, user, body, ctx)

@@ -8,6 +8,8 @@
 import type { Db } from './db.ts'
 import { buildLmaTools, type ToolSpec } from './tools.ts'
 import { resolveAi, callLlm, thinkingPayload } from './ai.ts'
+import { extractSoulEntry } from './ai.ts'
+import { appendSoul } from './soul.ts'
 import { PROJECT_KNOWLEDGE } from './knowledge.ts'
 
 const MAX_ROUNDS = 8
@@ -63,6 +65,13 @@ export interface AssistantResult {
  * @param db - 数据库
  * @param userMessage - 用户输入
  */
+/** 判断用户消息是否可能包含对邮件的持久性需求（控制提取成本） */
+const SOUL_CHAT_KEYWORDS = ['邮件', '模板', '语气', '风格', '称呼', '开头', '结尾', '署名', 'CTA', '禁用', '希望', '不要', '避免', '记得', '以后', '推广', '正文', '主题']
+function chatMayCarrySoulNeed(msg: string): boolean {
+  if (msg.length < 12) return false
+  return SOUL_CHAT_KEYWORDS.some((k) => msg.includes(k))
+}
+
 export async function runAssistant(db: Db, userMessage: string): Promise<AssistantResult> {
   const ai = resolveAi(db)
   const specs = buildLmaTools(db)
@@ -74,6 +83,12 @@ export async function runAssistant(db: Db, userMessage: string): Promise<Assista
       steps: [],
       mode: 'mock',
     }
+  }
+
+  // soul 记忆：若本次聊天包含对邮件的持久需求，先提炼并落盘，再继续对话
+  if (chatMayCarrySoulNeed(userMessage)) {
+    const rule = await extractSoulEntry(db, `用户在 AI 聊天中表达了对邮件生成的长期需求：${userMessage}`).catch(() => null)
+    if (rule) appendSoul(db, { type: 'chat', at: new Date().toISOString().slice(0, 10), text: rule })
   }
 
   const tools = specs.map(toOpenAiTool)

@@ -2,6 +2,7 @@
 // 页脚（来源声明 + 退订链接）由服务端固定追加（F-AI-04/05、F-COMP-01）
 import type { Db, AiConfig } from './db.ts'
 import { getProfile, getEmailTemplate, getConfig, getSmtpConfig } from './db.ts'
+import { readSoul } from './soul.ts'
 import { hmac } from './util.ts'
 
 export interface AiRuntime {
@@ -165,11 +166,13 @@ export async function generateDraft(db: Db, supplier: SupplierLike, match: Match
   const ai = resolveAi(db)
   if (ai.mode === 'api' && ai.url && ai.key) {
     const banned = (tpl.bannedWords || []).join(', ')
+    const soul = readSoul(db)
+    const soulRules = parseSoulRules(soul)
     const content = await callLlm(ai, [
       { role: 'system', content:
         `你是国际商务邮件撰写专家。输出 JSON：{"subject":"主题","body":"正文（纯文本，不含页脚）"}。硬性要求：
 1. 语言：${lang === 'zh' ? '中文' : '英文'}；2. subject ≤ ${tpl.subjectMax} 字符；3. body ≤ ${tpl.bodyMaxWords} 词；
-4. 禁用词：${banned}；5. 必须包含明确 CTA；6. 不得编造我方不存在的服务与数据。只输出 JSON。` },
+4. 禁用词：${banned}；5. 必须包含明确 CTA；6. 不得编造我方不存在的服务与数据。只输出 JSON。` + (soulRules ? `\n7. 长期偏好（soul 记忆，必须逐条遵守）：\n${soulRules}` : '') },
       { role: 'user', content:
         `我方画像：${JSON.stringify(profile)}\n对方：${supplier.company_name}（${supplier.country ?? '未知'}），主营：${supplier.business ?? '未知'}，网络：${supplier.networks ?? '未知'}，介绍：${(supplier.profile ?? '').slice(0, 500)}。\n匹配度 ${match.score}，分析：${match.analysis}` },
     ], 1600)
@@ -213,4 +216,37 @@ If you are interested, simply reply to this email or let us schedule a quick 15-
 Best regards,
 ${profile.companyName}`
   return { subject: subject.slice(0, tpl.subjectMax), body }
+}
+
+/** 从 soul 全文提取「记忆」条目文本（供 prompt 注入；去头部与空行） */
+export function parseSoulRules(soulText: string): string {
+  const lines = soulText.split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('- ['))
+  return lines.length ? lines.join('\n') : ''
+}
+
+/**
+ * 从一段上下文（驳回原因 / 聊天需求）提炼一条持久邮件偏好。
+ * api 模式用 LLM 提炼为一句明确规则；mock 模式返回 null（不沉淀）。
+ * 提炼失败静默返回 null，不阻断主流程。
+ */
+export async function extractSoulEntry(db: Db, context: string, maxChars = 200): Promise<string | null> {
+  const ai = resolveAi(db)
+  if (ai.mode !== 'api' || !ai.url || !ai.key) return null
+  try {
+    const res = await callLlm(ai, [
+      { role: 'system', content:
+        `你是邮件运营经验沉淀助手。根据用户提供的「邮件被驳回原因 / 用户对邮件的修改需求」，提炼一条对未来邮件生成有持久指导意义的明确规则。
+要求：
+1. 必须是对今后所有邮件都适用的偏好/教训，而非一次性修改；
+2. 用一句可执行的话描述，明确「应避免什么」或「应该怎样」；
+3. 不超过 ${maxChars} 字；不要解释，不要引号，直接输出规则本身。` },
+      { role: 'user', content: context },
+    ], 300)
+    const t = res.trim().replace(/^["'`-]+|["'`]+$/g, '').replace(/^规则[:：]?\s*/, '')
+    return t ? t.slice(0, maxChars) : null
+  } catch {
+    return null
+  }
 }

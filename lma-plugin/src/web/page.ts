@@ -485,7 +485,13 @@ async function renderConfig() {
     '<div class="row2"><label class="muted"><input type="checkbox" id="bk-audit" style="vertical-align:middle"> 包含审计日志 sheet</label>' +
     '<button class="primary" data-act="save-backup">保存</button>' +
     '<button data-act="bk-now">立即发送备份</button></div>' +
-    '<div class="muted" id="bk-state"></div></div>'
+    '<div class="muted" id="bk-state"></div></div>' +
+    '<div class="card"><b>Soul 长期记忆（邮件生成偏好）</b>' +
+    '<p class="muted">草稿被驳回的原因、你在 AI 聊天中表达的邮件需求，会自动提炼为长期规则存入本地 soul.md；每次生成邮件草稿时自动参考。可在此查看、编辑或清空。</p>' +
+    '<textarea id="soul-text" rows="10" style="width:100%;font-family:ui-monospace,monospace;font-size:12px" placeholder="记忆内容将显示在这里"></textarea>' +
+    '<div class="row2"><button class="primary" data-act="save-soul">保存记忆</button>' +
+    '<button class="danger" data-act="clear-soul">清空全部记忆</button></div>' +
+    '<div class="muted" id="soul-state"></div></div>'
 
   $('#pf-name').value = d.profile.companyName
   $('#pf-markets').value = d.profile.targetMarkets.join(', ')
@@ -511,6 +517,12 @@ async function renderConfig() {
   $('#ai-model').value = ai.model
   $('#ai-thinking').value = ai.thinking || 'auto'
   $('#ai-state').textContent = ai.keySet ? ('当前 Key：' + ai.keyMasked) : '当前未设置 Key（api 模式必须设置）'
+
+  const soul = await api('api/soul')
+  $('#soul-text').value = soul.text
+  $('#soul-state').textContent = soul.entries.length
+    ? ('已沉淀 ' + soul.entries.length + ' 条记忆（最近：' + soul.entries.slice(0, 3).map((e) => e.text.slice(0, 30)).join(' / ') + '…）')
+    : '暂无记忆：驳回草稿或与 AI 聊天描述邮件需求后将自动沉淀'
 
   const smtp = await api('api/smtp-config')
   $('#smtp-host').value = smtp.host
@@ -677,6 +689,15 @@ document.addEventListener('click', async (e) => {
     } else if (act === 'reset-policy') {
       await post('api/config', { send_policy: { interval_minutes: 3, daily_limit: 20, check_working_hours: true, work_start: 9, work_end: 18, auto_followup: false, followup_after_days: 3, followup_max: 2 } })
       toast('已恢复默认发送策略')
+      await renderConfig()
+    } else if (act === 'save-soul') {
+      await post('api/soul', { text: $('#soul-text').value })
+      toast('Soul 记忆已保存')
+      await renderConfig()
+    } else if (act === 'clear-soul') {
+      if (!confirm('确定清空全部 Soul 记忆？此操作不可撤销。')) return
+      await post('api/soul', { action: 'clear' })
+      toast('Soul 记忆已清空')
       await renderConfig()
     } else if (act === 'save-ai') {
       const r = await post('api/ai-config', {
