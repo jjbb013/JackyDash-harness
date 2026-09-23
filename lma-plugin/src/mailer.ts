@@ -62,6 +62,29 @@ async function getTransport(db: Db): Promise<unknown> {
   return transport
 }
 
+/** 通用发送（备份邮件等非草稿邮件）：to 为邮箱地址，attachments 为 nodemailer 附件数组；无 SMTP 时返回 log 模式 */
+export async function sendRawMail(
+  db: Db, to: string, subject: string, text: string,
+  attachments?: Array<{ filename: string; content: Buffer | string; contentType?: string }>,
+): Promise<{ messageId: string | null; mode: string }> {
+  const smtp = smtpOf(db)
+  let messageId: string | null = null
+  if (smtpConfigured(db)) {
+    const tr = await getTransport(db) as
+      { sendMail: (o: Record<string, unknown>) => Promise<{ messageId?: string }> } | null
+    if (tr) {
+      const info = await tr.sendMail({
+        from: smtp.from, to, subject, text,
+        attachments: attachments ?? [],
+      })
+      messageId = info.messageId ?? null
+      return { messageId, mode: 'smtp' }
+    }
+  }
+  console.log(`[lma] log-mode 备份邮件：to=${to} subject=${subject} attachments=${attachments?.length ?? 0}`)
+  return { messageId: null, mode: 'log' }
+}
+
 export async function sendDraftMail(db: Db, draft: DraftLike, supplier: SupplierLike): Promise<{ messageId: string | null; mode: string }> {
   const text = draft.body + buildFooter(db, supplier, BASE_URL)
   // List-Unsubscribe 头与正文页脚保持一致：优先 mailto 回信退订（RFC 2369 标准写法，

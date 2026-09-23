@@ -7,6 +7,7 @@ import { getProfile, getEmailTemplate, getSendPolicy, getAiConfig, getSmtpConfig
 import { countryToTimezone } from '../timezone.ts'
 import { queueSnapshot, todaySentCount } from '../sendqueue.ts'
 import { audit } from '../audit.ts'
+import { getBackupConfig, saveBackupConfig, runBackupAndSend, backupSummary } from '../backup.ts'
 import { isValidEmail, sqlNow, maskSecret } from '../util.ts'
 import type { SessionUser } from '../auth/session.ts'
 import { listUsers, createUser, updateUser } from './admin.ts'
@@ -221,6 +222,37 @@ function importConfirm(db: Db, user: SessionUser, body: Record<string, unknown>)
   }
 }
 
+/** GET/POST /api/backup-config：读取/保存定时备份配置（仅 admin；to 必填校验） */
+function backupConfigView(db: Db): ApiResponse {
+  return { status: 200, body: { config: getBackupConfig(db) } }
+}
+function saveBackupConfigCtl(db: Db, user: SessionUser, body: Record<string, unknown>): ApiResponse {
+  const cur = getBackupConfig(db)
+  const enabled = body.enabled !== undefined ? Boolean(body.enabled) : cur.enabled
+  const schedule = ['daily', 'weekly', 'monthly'].includes(String(body.schedule ?? cur.schedule)) ? String(body.schedule ?? cur.schedule) : cur.schedule
+  const hour = Number.isInteger(body.hour) ? body.hour : cur.hour
+  const minute = Number.isInteger(body.minute) ? body.minute : cur.minute
+  const to = String(body.to ?? cur.to).trim()
+  const from = body.from !== undefined ? String(body.from).trim() : (cur.from ?? '')
+  const includeAudit = body.include_audit !== undefined ? Boolean(body.include_audit) : cur.includeAudit
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return { status: 400, body: { error: '时间必须在 00:00–23:59 之间' } }
+  if (enabled && !to) return { status: 400, body: { error: '启用定时备份必须填写收件邮箱' } }
+  if (enabled && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return { status: 400, body: { error: '收件邮箱格式不正确' } }
+  const next = { ...cur, enabled, schedule: schedule as 'daily' | 'weekly' | 'monthly', hour, minute, to, from, includeAudit }
+  saveBackupConfig(db, next, user.username)
+  audit(db, user.username, 'backup_config', 'backup_config', null, { enabled, schedule, hour, minute, to, includeAudit }, { ip: '', ua: '', sessionId: '' })
+  return { status: 200, body: { ok: true, config: next } }
+}
+/** POST /api/backup/send-now：立即生成并发送一次全量备份邮件（仅 admin） */
+async function backupSendNow(db: Db, user: SessionUser): Promise<ApiResponse> {
+  try {
+    const r = await runBackupAndSend(db, user.username)
+    return { status: 200, body: { ok: true, ...r } }
+  } catch (e) {
+    return { status: 400, body: { error: (e as Error).message } }
+  }
+}
+
 /** GET /api/ai-config：**绝不回传 Key 明文**，只回是否已设置与掩码 */
 function aiConfigView(db: Db): ApiResponse {
   const c = getAiConfig(db)
@@ -307,6 +339,8 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/import/preview': { methods: ['POST'], roles: ['admin'] },
   '/api/import/confirm': { methods: ['POST'], roles: ['admin'] },
   '/api/ai-config':      { methods: ['GET', 'POST'], roles: ['admin'] },
+  '/api/backup-config':  { methods: ['GET', 'POST'], roles: ['admin'] },
+  '/api/backup/send-now':{ methods: ['POST'],          roles: ['admin'] },
   // 人员管理（F-AUTH-08）：仅 admin
   '/api/users':        { methods: ['GET', 'POST'], roles: ['admin'] },
   '/api/users/update': { methods: ['POST'],       roles: ['admin'] },
@@ -373,6 +407,8 @@ export async function handleApi(
     }
 
     case '/api/smtp-config': return method === 'GET' ? smtpConfigView(db) : saveSmtpConfig(db, user, body, ctx)
+    case '/api/backup-config': return method === 'GET' ? backupConfigView(db) : saveBackupConfigCtl(db, user, body)
+    case '/api/backup/send-now': return backupSendNow(db, user)
     case '/api/imap-config': return method === 'GET' ? imapConfigView(db) : saveImapConfig(db, user, body, ctx)
     case '/api/draft/generate':     return await draftGenerate(db, user, body, ctx)
     case '/api/supplier/update':     return supplierUpdate(db, user, body, ctx)

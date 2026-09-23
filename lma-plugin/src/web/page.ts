@@ -332,7 +332,19 @@ async function renderConfig() {
     '<input type="password" id="imap-pass" placeholder="密码/授权码（留空保持不变）" style="flex:1">' +
     '<button class="primary" data-act="save-imap">保存</button>' +
     '<button data-act="clear-imap-pass">清除密码</button></div>' +
-    '<div class="muted" id="imap-state"></div></div>'
+    '<div class="muted" id="imap-state"></div></div>' +
+    '<div class="card"><b>定时数据备份（邮件送达）</b>' +
+    '<p class="muted">按设定频率把全量业务数据打包为 xlsx（多 sheet：供应商 / 邮件草稿 / 邮件事件 / 退订名单 / 审计日志 / 导入导出记录 / 账号），经已配置的 SMTP 发到你的邮箱。附件用 Excel/WPS 打开即可。</p>' +
+    '<div class="row2"><label class="muted"><input type="checkbox" id="bk-enabled" style="vertical-align:middle"> 启用定时备份</label>' +
+    '<select id="bk-schedule" style="width:130px"><option value="daily">每天</option><option value="weekly">每周日</option><option value="monthly">每月 1 日</option></select>' +
+    '<input type="number" id="bk-hour" style="width:80px" min="0" max="23" placeholder="时">' +
+    '<input type="number" id="bk-minute" style="width:80px" min="0" max="59" placeholder="分"></div>' +
+    '<div class="row2"><input type="text" id="bk-to" placeholder="收件邮箱（必填）" style="flex:1">' +
+    '<input type="text" id="bk-from" placeholder="发件人 From（留空=SMTP 用户名）" style="flex:1"></div>' +
+    '<div class="row2"><label class="muted"><input type="checkbox" id="bk-audit" style="vertical-align:middle"> 包含审计日志 sheet</label>' +
+    '<button class="primary" data-act="save-backup">保存</button>' +
+    '<button data-act="bk-now">立即发送备份</button></div>' +
+    '<div class="muted" id="bk-state"></div></div>'
 
   const ai = await api('api/ai-config')
   $('#ai-mode').value = ai.mode
@@ -358,6 +370,18 @@ async function renderConfig() {
   $('#imap-port').value = imap.port
   $('#imap-tls').value = String(imap.tls)
   $('#imap-state').textContent = imap.passSet
+
+  const bk = await api('api/backup-config')
+  $('#bk-enabled').checked = bk.config.enabled
+  $('#bk-schedule').value = bk.config.schedule
+  $('#bk-hour').value = bk.config.hour
+  $('#bk-minute').value = bk.config.minute
+  $('#bk-to').value = bk.config.to
+  $('#bk-from').value = bk.config.from || ''
+  $('#bk-audit').checked = bk.config.includeAudit
+  $('#bk-state').textContent = bk.config.lastRunAt
+    ? ('上次运行：' + bk.config.lastRunAt.slice(0, 16).replace('T', ' ') + ' · ' + (bk.config.lastResult || ''))
+    : '尚未运行过'
     ? ('密码：' + imap.passMasked + (imap.envFallback ? '（另有环境变量配置）' : ''))
     : (imap.envFallback ? '未在网页设置密码（使用环境变量配置）' : '未设置密码')
 }
@@ -468,6 +492,22 @@ document.addEventListener('click', async (e) => {
         from: $('#smtp-from').value, pass: $('#smtp-pass').value,
       })
       toast('SMTP 配置已保存' + (r.host && r.user ? '（将真实发信）' : '（log 模式）'))
+      await renderConfig()
+    } else if (act === 'save-backup') {
+      const r = await post('api/backup-config', {
+        enabled: $('#bk-enabled').checked, schedule: $('#bk-schedule').value,
+        hour: Number($('#bk-hour').value), minute: Number($('#bk-minute').value),
+        to: $('#bk-to').value, from: $('#bk-from').value, include_audit: $('#bk-audit').checked,
+      })
+      toast('备份配置已保存' + (r.config.enabled ? '，将在设定时间自动发送' : ''))
+      await renderConfig()
+    } else if (act === 'bk-now') {
+      try {
+        const r = await post('api/backup/send-now', {})
+        toast('备份邮件已发送至 ' + r.to + '（' + r.mode + '）')
+      } catch (e) {
+        toast('发送失败：' + e.message)
+      }
       await renderConfig()
     } else if (act === 'clear-smtp-pass') {
       await post('api/smtp-config', { pass: '__clear__' })

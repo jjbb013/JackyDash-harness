@@ -21,6 +21,7 @@ import { agentIdentitySummary } from './roles.ts'
 import { purgeExpiredSessions } from './auth/session.ts'
 import { purgeOldAttempts } from './auth/throttle.ts'
 import { envSummary } from './env.ts'
+import { getBackupConfig, shouldRunBackup, runBackupAndSend } from './backup.ts'
 
 const DB_PATH = process.env.LMA_DB_PATH
   ?? path.join(process.cwd(), 'lma-data', 'lma.db')
@@ -100,6 +101,19 @@ export function startLma(opts: { port?: number; dbPath?: string } = {}): void {
 
     timers.push(backupTick)
   }
+
+  // 定时全量备份邮件（每分钟检查一次调度是否命中；发送失败仅记日志，不中断进程）
+  const backupMailTick = setInterval(() => {
+    const cfg = getBackupConfig(db)
+    if (!shouldRunBackup(cfg, new Date())) return
+    runBackupAndSend(db, 'schedule').then((r) => {
+      console.log(`[lma] 定时备份邮件已发送：${r.to} · ${r.message}`)
+    }).catch((e) => {
+      console.error('[lma] 定时备份邮件发送失败：', (e as Error).message)
+    })
+  }, 60_000)
+
+  timers.push(backupMailTick)
 
   // Web 仪表盘 + 登录 + JSON API + 退订端点（独立版即主站，不再交接聊天台）
   const webServer = startWebServer(db, port)

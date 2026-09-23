@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../src/db.ts'
 import { hashPassword } from '../src/auth/passwords.ts'
 import { buildFooter } from '../src/ai.ts'
+import { buildBackupXlsx, backupSummary, shouldRunBackup, DEFAULT_BACKUP_CONFIG } from '../src/backup.ts'
 import { startWebServer } from '../src/web/server.ts'
 
 const pw = (p: string): string => p
@@ -53,6 +54,84 @@ beforeAll(async () => {
   staffCookie = await login('staff1', STAFF_PW)
 })
 afterAll(() => { server.close(); fs.rmSync(tmp, { recursive: true, force: true }) })
+
+describe('定时备份（/api/backup-config + /api/backup/send-now，仅 admin）', () => {
+  it('staff 403；收件邮箱/时间校验', async () => {
+    const denied = await fetch(`${base}/api/backup-config`, { headers: { cookie: staffCookie } })
+    expect(denied.status).toBe(403)
+    const badTime = await fetch(`${base}/api/backup-config`, {
+      method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true, to: 'a@b.com', hour: 25, minute: 0 }),
+    })
+    expect(badTime.status).toBe(400)
+    const noTo = await fetch(`${base}/api/backup-config`, {
+      method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true, to: '', hour: 3, minute: 0 }),
+    })
+    expect(noTo.status).toBe(400)
+  })
+
+  it('保存配置并立即发送备份（log 模式：测试环境无 SMTP），审计落库', async () => {
+    const save = await fetch(`${base}/api/backup-config`, {
+      method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false, schedule: 'daily', hour: 3, minute: 30, to: 'backup@test.dev', include_audit: true }),
+    })
+    expect(save.status).toBe(200)
+    const r = (await save.json()) as { config: { to: string; hour: number; lastRunAt?: string } }
+    expect(r.config.to).toBe('backup@test.dev')
+    expect(r.config.hour).toBe(3)
+
+    const send = await fetch(`${base}/api/backup/send-now`, {
+      method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' }, body: '{}',
+    })
+    expect(send.status).toBe(200)
+    const sr = (await send.json()) as { ok: boolean; mode: string; to: string }
+    expect(sr.ok).toBe(true)
+    expect(sr.mode).toBe('log')
+    expect(sr.to).toBe('backup@test.dev')
+
+    const view = await fetch(`${base}/api/backup-config`, { headers: { cookie: adminCookie } })
+    const v = (await view.json()) as { config: { lastRunAt?: string; lastResult?: string } }
+    expect(v.config.lastRunAt).toBeTruthy()
+    expect(v.config.lastResult).toContain('ok')
+  })
+
+  it('未配置收件邮箱时 send-now 400', async () => {
+    const save = await fetch(`${base}/api/backup-config`, {
+      method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false, to: '' }),
+    })
+    expect(save.status).toBe(200)
+    const send = await fetch(`${base}/api/backup/send-now`, {
+      method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' }, body: '{}',
+    })
+    expect(send.status).toBe(400)
+  })
+
+  it('xlsx 生成：多 sheet、含数据行；摘要含供应商数', async () => {
+    const buf = await buildBackupXlsx(db, true)
+    expect(buf.length).toBeGreaterThan(1000)
+    const ExcelJS = (await import('exceljs')).default
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.load(buf)
+    expect(wb.worksheets.length).toBeGreaterThanOrEqual(8)
+    const sup = wb.getWorksheet('supplier')
+    expect(sup.getRow(1).getCell(1).value).toBe('id')
+    const summ = backupSummary(db)
+    expect(summ).toContain('供应商：')
+    expect(summ).toContain('LMA 物流推广系统')
+  })
+
+  it('调度判定：非到点不跑；同一时刻当天只跑一次', () => {
+    const base: typeof DEFAULT_BACKUP_CONFIG = { ...DEFAULT_BACKUP_CONFIG, enabled: true, to: 'a@b.com', hour: 3, minute: 0 }
+    expect(shouldRunBackup(base, new Date(2026, 0, 2, 3, 0))).toBe(true)
+    expect(shouldRunBackup({ ...base, hour: 4 }, new Date(2026, 0, 2, 3, 0))).toBe(false)
+    expect(shouldRunBackup({ ...base, schedule: 'weekly' }, new Date(2026, 0, 2, 3, 0))).toBe(false) // 周五
+    expect(shouldRunBackup({ ...base, schedule: 'weekly' }, new Date(2026, 0, 4, 3, 0))).toBe(true)   // 周日
+    expect(shouldRunBackup({ ...base, lastRunAt: '2026-01-02T03:00:00.000Z' }, new Date(2026, 0, 2, 3, 1))).toBe(false) // 已跑过
+    expect(shouldRunBackup({ ...base, enabled: false }, new Date(2026, 0, 2, 3, 0))).toBe(false)
+  })
+})
 
 describe('SMTP / IMAP 配置（仅 admin）', () => {
   it('staff 访问配置端点 → 403', async () => {
