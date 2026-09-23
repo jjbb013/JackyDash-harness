@@ -80,6 +80,17 @@ describe('批量生成草稿（/api/draft/generate-batch，仅 admin）', () => 
   })
 })
 
+describe('导入失败行下载（/api/import/failed-csv，仅 admin）', () => {
+  it('缺失 batch_id 400；不存在的批次 404；staff 403', async () => {
+    const r0 = await fetch(`${base}/api/import/failed-csv`, { headers: { cookie: adminCookie } })
+    expect(r0.status).toBe(400)
+    const nf = await fetch(`${base}/api/import/failed-csv?batch_id=nope`, { headers: { cookie: adminCookie } })
+    expect(nf.status).toBe(404)
+    const s = await fetch(`${base}/api/import/failed-csv?batch_id=nope`, { headers: { cookie: staffCookie } })
+    expect(s.status).toBe(403)
+  })
+})
+
 describe('SMTP / IMAP 配置（仅 admin）', () => {
   it('staff 访问配置端点 → 403', async () => {
     for (const p of ['/api/smtp-config', '/api/imap-config']) {

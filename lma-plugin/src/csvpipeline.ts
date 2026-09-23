@@ -65,6 +65,8 @@ export function getCell(row: string[], idx: number | null): string {
 export interface RowIssue {
   row: number
   reason: string
+  /** 失败行的标准字段值（normalizeRow 结果），供「下载失败行 CSV 修正后重导入」 */
+  data?: Record<string, string>
 }
 
 export interface ImportReport {
@@ -213,7 +215,7 @@ export function executeImport(
     if (!base.company_name) reason.push('公司名称缺失')
     if (!base.country) reason.push('国家缺失且未指定默认国家')
     if (reason.length) {
-      if (failures.length < 2000) failures.push({ row: i + 2, reason: reason.join('；') })
+      if (failures.length < 2000) failures.push({ row: i + 2, reason: reason.join('；'), data: base })
       return 'failed'
     }
 
