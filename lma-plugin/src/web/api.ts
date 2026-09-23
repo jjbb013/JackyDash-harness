@@ -100,6 +100,23 @@ function reviewQueue(db: Db, p: URLSearchParams): ApiResponse {
   return { status: 200, body: { total, page, size, rows } }
 }
 
+function auditLogs(db: Db, p: URLSearchParams): ApiResponse {
+  const page = Math.max(1, Number(p.get('page') ?? '1') || 1)
+  const size = Math.min(100, Math.max(10, Number(p.get('size') ?? '50') || 50))
+  const where = ['1=1']
+  const a: string[] = []
+  const user = p.get('user')?.trim(); if (user) { where.push('username = ?'); a.push(user) }
+  const action = p.get('action')?.trim(); if (action) { where.push('action LIKE ?'); a.push('%' + action + '%') }
+  const q = p.get('q')?.trim(); if (q) { where.push('(detail LIKE ? OR object LIKE ?)'); a.push('%' + q + '%', '%' + q + '%') }
+  const total = (db.prepare(`SELECT COUNT(*) AS c FROM audit_log WHERE ${where.join(' AND ')}`).get(...a) as { c: number }).c
+  const rows = db.prepare(
+    `SELECT id, username, action, object, object_id, detail, created_at
+     FROM audit_log WHERE ${where.join(' AND ')}
+     ORDER BY id DESC LIMIT ? OFFSET ?`,
+  ).all(...a, size, (page - 1) * size)
+  return { status: 200, body: { total, page, size, rows } }
+}
+
 function review(db: Db, user: SessionUser, body: Record<string, unknown>): ApiResponse {
   const operator = user.username // 角色判定已由 ROUTE_ROLES 完成
   const id = num(String(body.draft_id ?? ''), 0)
@@ -301,6 +318,7 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/review-queue': { methods: ['GET'],  roles: ['admin', 'staff'] },
   '/api/send-queue':   { methods: ['GET'],  roles: ['admin', 'staff'] },
   '/api/unsubscribes': { methods: ['GET'],  roles: ['admin', 'staff'] },
+  '/api/audit-logs':   { methods: ['GET'],  roles: ['admin'] },
   '/api/config':       { methods: ['GET'],  roles: ['admin'] },        // 配置/画像：仅 admin
   // 写操作
   '/api/review':       { methods: ['POST'], roles: ['admin', 'staff'] }, // 审核邮件：两角色
@@ -350,6 +368,7 @@ export async function handleApi(
     case '/api/review-queue': return reviewQueue(db, params)
     case '/api/send-queue':   return sendQueue(db)
     case '/api/unsubscribes': return unsubscribes(db)
+    case '/api/audit-logs':   return auditLogs(db, params)
     case '/api/config':       return config(db)
     case '/api/review':       return review(db, user, body)
     case '/api/unsubscribe':  return unsubscribeAdd(db, user, body)
