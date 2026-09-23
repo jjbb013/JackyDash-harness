@@ -68,6 +68,18 @@ describe('审计日志接口（/api/audit-logs，仅 admin）', () => {
   })
 })
 
+
+describe('批量生成草稿（/api/draft/generate-batch，仅 admin）', () => {
+  it('空 ids 400；ids 上限校验；staff 403', async () => {
+    const r0 = await postJson('/api/draft/generate-batch', {}, adminCookie)
+    expect(r0.status).toBe(400)
+    const big = await postJson('/api/draft/generate-batch', { ids: Array.from({ length: 51 }, (_, i) => i + 1) }, adminCookie)
+    expect(big.status).toBe(400)
+    const s = await postJson('/api/draft/generate-batch', { ids: [1] }, staffCookie)
+    expect(s.status).toBe(403)
+  })
+})
+
 describe('SMTP / IMAP 配置（仅 admin）', () => {
   it('staff 访问配置端点 → 403', async () => {
     for (const p of ['/api/smtp-config', '/api/imap-config']) {
