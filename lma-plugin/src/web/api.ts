@@ -362,6 +362,79 @@ function config(db: Db): ApiResponse {
   return { status: 200, body: { profile: getProfile(db), email_template: getEmailTemplate(db), send_policy: getSendPolicy(db) } }
 }
 
+const strArr = (v: unknown): string[] =>
+  Array.isArray(v) ? v.map(String).map((x) => x.trim()).filter(Boolean) : []
+const numIn = (v: unknown, lo: number, hi: number, fallback: number, name: string): number | null => {
+  const n = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(n) || n < lo || n > hi) return null
+  return Math.round(n)
+}
+
+/** POST /api/config：保存业务画像 / 邮件模板约束 / 发送策略（任意组合，仅 admin；全部表单化非 JSON 编辑） */
+function saveConfigCtl(db: Db, user: SessionUser, body: Record<string, unknown>, ctx: ApiContext): ApiResponse {
+  const changed: string[] = []
+  const profile = body.profile as Record<string, unknown> | undefined
+  if (profile) {
+    const cur = getProfile(db)
+    const next = {
+      companyName: String(profile.company_name ?? cur.companyName).trim() || cur.companyName,
+      intro: String(profile.intro ?? cur.intro).trim(),
+      services: strArr(profile.services ?? cur.services),
+      strengths: strArr(profile.strengths ?? cur.strengths),
+      targetMarkets: strArr(profile.target_markets ?? cur.targetMarkets),
+    }
+    if (!next.companyName) return { status: 400, body: { error: '公司名称不能为空' } }
+    if (!next.services.length || !next.strengths.length) return { status: 400, body: { error: '服务与优势至少各填一项（每行一项）' } }
+    setConfig(db, 'profile', next, user.username)
+    changed.push('profile')
+  }
+  const tmpl = body.email_template as Record<string, unknown> | undefined
+  if (tmpl) {
+    const cur = getEmailTemplate(db)
+    const subjectMax = numIn(tmpl.subject_max ?? cur.subjectMax, 10, 500, cur.subjectMax, 'subject_max')
+    const bodyMaxWords = numIn(tmpl.body_max_words ?? cur.bodyMaxWords, 20, 1000, cur.bodyMaxWords, 'body_max_words')
+    if (subjectMax === null || bodyMaxWords === null) return { status: 400, body: { error: '主题上限（10-500 字符）与正文词数上限（20-1000 词）需为有效数字' } }
+    const next = {
+      footerSource: String(tmpl.footer_source ?? cur.footerSource).trim() || cur.footerSource,
+      bannedWords: strArr(tmpl.banned_words ?? cur.bannedWords),
+      subjectMax,
+      bodyMaxWords,
+      ctaHint: String(tmpl.cta_hint ?? cur.ctaHint).trim() || cur.ctaHint,
+    }
+    setConfig(db, 'email_template', next, user.username)
+    changed.push('email_template')
+  }
+  const pol = body.send_policy as Record<string, unknown> | undefined
+  if (pol) {
+    const cur = getSendPolicy(db)
+    const intervalMinutes = numIn(pol.interval_minutes ?? cur.intervalMinutes, 1, 1440, cur.intervalMinutes, 'interval_minutes')
+    const dailyLimit = numIn(pol.daily_limit ?? cur.dailyLimit, 1, 500, cur.dailyLimit, 'daily_limit')
+    const workStart = numIn(pol.work_start ?? cur.workStart, 0, 23, cur.workStart, 'work_start')
+    const workEnd = numIn(pol.work_end ?? cur.workEnd, 0, 23, cur.workEnd, 'work_end')
+    const followupAfterDays = numIn(pol.followup_after_days ?? cur.followupAfterDays, 1, 30, cur.followupAfterDays, 'followup_after_days')
+    const followupMax = numIn(pol.followup_max ?? cur.followupMax, 1, 10, cur.followupMax, 'followup_max')
+    if ([intervalMinutes, dailyLimit, workStart, workEnd, followupAfterDays, followupMax].includes(null)) {
+      return { status: 400, body: { error: '发送策略中存在无效数字（间隔 1-1440 分钟 / 日上限 1-500 / 时段 0-23 / 跟进 1-30 天 / 跟进上限 1-10）' } }
+    }
+    if (workStart! >= workEnd!) return { status: 400, body: { error: '工作时段结束时间必须晚于开始时间' } }
+    const next = {
+      intervalMinutes: intervalMinutes!,
+      dailyLimit: dailyLimit!,
+      checkWorkingHours: pol.check_working_hours !== undefined ? Boolean(pol.check_working_hours) : cur.checkWorkingHours,
+      workStart: workStart!,
+      workEnd: workEnd!,
+      autoFollowup: pol.auto_followup !== undefined ? Boolean(pol.auto_followup) : cur.autoFollowup,
+      followupAfterDays: followupAfterDays!,
+      followupMax: followupMax!,
+    }
+    setConfig(db, 'send_policy', next, user.username)
+    changed.push('send_policy')
+  }
+  if (!changed.length) return { status: 400, body: { error: '没有可保存的内容（需提供 profile / email_template / send_policy 之一）' } }
+  audit(db, user.username, 'config_update', 'config', null, { changed }, { ip: ctx.ip, ua: ctx.ua, sessionId: user.sessionId })
+  return { status: 200, body: { ok: true, changed } }
+}
+
 /**
  * 路由一条 /api/* 请求；不属于 API 的路径返回 null（由调用方继续处理）。
  */
@@ -380,7 +453,7 @@ const ROUTE_ROLES: Record<string, { methods: string[]; roles: Array<'admin' | 's
   '/api/send-queue':   { methods: ['GET'],  roles: ['admin', 'staff'] },
   '/api/unsubscribes': { methods: ['GET'],  roles: ['admin', 'staff'] },
   '/api/audit-logs':   { methods: ['GET'],  roles: ['admin'] },
-  '/api/config':       { methods: ['GET'],  roles: ['admin'] },        // 配置/画像：仅 admin
+  '/api/config':       { methods: ['GET', 'POST'], roles: ['admin'] },  // 配置/画像：仅 admin
   // 写操作
   '/api/review':       { methods: ['POST'], roles: ['admin', 'staff'] }, // 审核邮件：两角色
   '/api/unsubscribe':  { methods: ['POST'], roles: ['admin', 'staff'] }, // 退订名单维护：按决策放开给 staff
@@ -434,7 +507,7 @@ export async function handleApi(
     case '/api/send-queue':   return sendQueue(db)
     case '/api/unsubscribes': return unsubscribes(db)
     case '/api/audit-logs':   return auditLogs(db, params)
-    case '/api/config':       return config(db)
+    case '/api/config':       return method === 'GET' ? config(db) : saveConfigCtl(db, user, body, ctx)
     case '/api/review':       return review(db, user, body)
     case '/api/unsubscribe':  return unsubscribeAdd(db, user, body)
     case '/api/send':         return send(db, user, body, ctx)

@@ -416,12 +416,32 @@ window.addUnsub = async () => {
 // ---------- 配置 ----------
 async function renderConfig() {
   const d = await api('/api/config')
-  $('#view').innerHTML = '<div class="card"><b>业务画像（' + esc(d.profile.companyName) + '）</b><pre>' + esc(d.profile.intro) + '</pre>' +
-    '<p><b>服务：</b>' + esc(d.profile.services.join('；')) + '</p><p><b>优势：</b>' + esc(d.profile.strengths.join('；')) +
-    '</p><p><b>目标市场：</b>' + esc(d.profile.targetMarkets.join(', ')) + '</p></div>' +
-    '<div class="card"><b>邮件模板约束</b><p class="muted">主题 ≤ ' + d.email_template.subjectMax + ' 字符 · 正文 ≤ ' + d.email_template.bodyMaxWords +
-    ' 词 · 禁用词：' + esc(d.email_template.bannedWords.join(', ')) + '</p></div>' +
-    '<div class="card"><b>发送策略</b><pre>' + esc(JSON.stringify(d.send_policy, null, 2)) + '</pre></div>' +
+  $('#view').innerHTML = '<div class="card"><b>业务画像</b>' +
+    '<div class="row2"><input type="text" id="pf-name" placeholder="公司名称"><input type="text" id="pf-markets" placeholder="目标市场（逗号分隔，如 NL,DE,US）" style="flex:1"></div>' +
+    '<textarea id="pf-intro" rows="4" placeholder="公司介绍"></textarea>' +
+    '<textarea id="pf-services" rows="4" placeholder="服务（每行一项）"></textarea>' +
+    '<textarea id="pf-strengths" rows="3" placeholder="优势（每行一项）"></textarea>' +
+    '<div class="row2"><button class="primary" data-act="save-profile">保存业务画像</button>' +
+    '<button data-act="reset-profile">恢复默认画像</button></div>' +
+    '<div class="muted">服务与优势每行一项；目标市场用逗号分隔。保存后 AI 匹配与邮件生成立即按新画像执行。</div></div>' +
+    '<div class="card"><b>邮件模板约束</b>' +
+    '<div class="row2"><label class="muted">主题上限（字符）</label><input type="number" id="tm-subject" min="10" max="500" style="width:110px">' +
+    '<label class="muted" style="margin-left:12px">正文词数上限</label><input type="number" id="tm-words" min="20" max="1000" style="width:110px"></div>' +
+    '<label class="muted">禁用词（逗号分隔）：</label><input type="text" id="tm-banned" placeholder="guarantee, 100%, free, cheapest…">' +
+    '<label class="muted">来源声明模板（页脚，{source} 会替换为数据来源）：</label><textarea id="tm-footer" rows="2"></textarea>' +
+    '<div class="row2"><button class="primary" data-act="save-template">保存模板约束</button>' +
+    '<button data-act="reset-template">恢复默认模板</button></div></div>' +
+    '<div class="card"><b>发送策略</b>' +
+    '<div class="row2"><label class="muted">发送间隔（分钟）</label><input type="number" id="sp-interval" min="1" max="1440" style="width:110px">' +
+    '<label class="muted" style="margin-left:12px">每日上限（封）</label><input type="number" id="sp-limit" min="1" max="500" style="width:110px"></div>' +
+    '<div class="row2"><label class="muted"><input type="checkbox" id="sp-workhours" style="vertical-align:middle"> 仅对方工作时段发送</label>' +
+    '<label class="muted">开始</label><input type="number" id="sp-wstart" min="0" max="23" style="width:70px">' +
+    '<label class="muted">结束</label><input type="number" id="sp-wend" min="0" max="23" style="width:70px"></div>' +
+    '<div class="row2"><label class="muted"><input type="checkbox" id="sp-follow" style="vertical-align:middle"> 自动跟进未回复</label>' +
+    '<label class="muted">N 天后</label><input type="number" id="sp-fdays" min="1" max="30" style="width:70px">' +
+    '<label class="muted">最多跟进</label><input type="number" id="sp-fmax" min="1" max="10" style="width:70px"><label class="muted">封</label></div>' +
+    '<div class="row2"><button class="primary" data-act="save-policy">保存发送策略</button>' +
+    '<button data-act="reset-policy">恢复默认策略</button></div></div>' +
     '<div class="card"><b>AI 端点配置</b>' +
     '<p class="muted">支持 DeepSeek 与任意 OpenAI 兼容端点（代码会拼 /chat/completions）。mock 为离线规则，不调用任何外部接口。</p>' +
     '<div class="row2"><select id="ai-mode"><option value="mock">mock（离线规则）</option><option value="api">api（调用端点）</option></select>' +
@@ -466,6 +486,24 @@ async function renderConfig() {
     '<button class="primary" data-act="save-backup">保存</button>' +
     '<button data-act="bk-now">立即发送备份</button></div>' +
     '<div class="muted" id="bk-state"></div></div>'
+
+  $('#pf-name').value = d.profile.companyName
+  $('#pf-markets').value = d.profile.targetMarkets.join(', ')
+  $('#pf-intro').value = d.profile.intro
+  $('#pf-services').value = d.profile.services.join('\\n')
+  $('#pf-strengths').value = d.profile.strengths.join('\\n')
+  $('#tm-subject').value = d.email_template.subjectMax
+  $('#tm-words').value = d.email_template.bodyMaxWords
+  $('#tm-banned').value = d.email_template.bannedWords.join(', ')
+  $('#tm-footer').value = d.email_template.footerSource
+  $('#sp-interval').value = d.send_policy.intervalMinutes
+  $('#sp-limit').value = d.send_policy.dailyLimit
+  $('#sp-workhours').checked = d.send_policy.checkWorkingHours
+  $('#sp-wstart').value = d.send_policy.workStart
+  $('#sp-wend').value = d.send_policy.workEnd
+  $('#sp-follow').checked = d.send_policy.autoFollowup
+  $('#sp-fdays').value = d.send_policy.followupAfterDays
+  $('#sp-fmax').value = d.send_policy.followupMax
 
   const ai = await api('api/ai-config')
   $('#ai-mode').value = ai.mode
@@ -595,6 +633,51 @@ document.addEventListener('click', async (e) => {
       $('#imp-out').innerHTML = '<pre>' + esc(JSON.stringify(r.report, null, 2)) + '</pre>' +
         (r.report.failedRows ? '<div style="margin-top:8px"><a class="dl" href="api/import/failed-csv?batch_id=' + encodeURIComponent(window.__impBatch) + '">下载失败行 CSV（修正后重新导入）</a></div>' : '')
       toast('导入完成：成功 ' + r.report.successRows + ' / 失败 ' + r.report.failedRows)
+    } else if (act === 'save-profile') {
+      await post('api/config', { profile: {
+        company_name: $('#pf-name').value, intro: $('#pf-intro').value,
+        services: $('#pf-services').value.split('\\n'), strengths: $('#pf-strengths').value.split('\\n'),
+        target_markets: $('#pf-markets').value.split(','),
+      } })
+      toast('业务画像已保存')
+      await renderConfig()
+    } else if (act === 'reset-profile') {
+      await post('api/config', { profile: {
+        company_name: 'Shanghai Transtar International Freight Forwarding Co., Ltd.',
+        intro: 'Established in 2022, Shanghai Transtar is a leading integrated logistics provider headquartered in Shanghai, China, with branch networks across major global trade hubs.',
+        services: ['Customs Clearance & Compliance (cross-border e-commerce clearance)', 'Multimodal Transport: Air/ocean freight, rail (China-Europe Express), barge', 'Bonded & Smart Warehousing: 50,000㎡ with RFID tracking', 'Consolidation: LCL/FCL for cost-sensitive shipments', 'Project Logistics: heavy-lift and oversize cargo', 'Door-to-Door Delivery: DDP/DDU/EXW with real-time tracking', 'Cold Chain & ISO Tank Solutions', 'Trade Consultation: Incoterms optimization and duty savings'],
+        strengths: ['Localized expertise in China logistics and port operations', 'Cost efficiency: negotiated rates with 100+ global carriers (COSCO, Maersk)', 'Technology-driven: AI-powered TMS for route optimization and carbon reduction', 'Customer-centric: 24/7 bilingual support and tailored SOPs for MNCs/SMEs'],
+        target_markets: ['NL', 'DE', 'GB', 'US', 'AU', 'SG', 'FR', 'BE', 'IT', 'ES'],
+      } })
+      toast('已恢复默认画像')
+      await renderConfig()
+    } else if (act === 'save-template') {
+      await post('api/config', { email_template: {
+        subject_max: Number($('#tm-subject').value), body_max_words: Number($('#tm-words').value),
+        banned_words: $('#tm-banned').value.split(','), footer_source: $('#tm-footer').value,
+      } })
+      toast('邮件模板约束已保存')
+      await renderConfig()
+    } else if (act === 'reset-template') {
+      await post('api/config', { email_template: {
+        subject_max: 80, body_max_words: 250,
+        banned_words: ['guarantee', '100%', 'free', 'cheapest', 'no.1', 'best price', 'best rates', 'best offer', '促销', '免费', '最低价'],
+        footer_source: 'You are receiving this email because your company was identified as a potential business partner (source: {source}). If you prefer not to receive further messages, please unsubscribe.',
+      } })
+      toast('已恢复默认模板约束')
+      await renderConfig()
+    } else if (act === 'save-policy') {
+      await post('api/config', { send_policy: {
+        interval_minutes: Number($('#sp-interval').value), daily_limit: Number($('#sp-limit').value),
+        check_working_hours: $('#sp-workhours').checked, work_start: Number($('#sp-wstart').value), work_end: Number($('#sp-wend').value),
+        auto_followup: $('#sp-follow').checked, followup_after_days: Number($('#sp-fdays').value), followup_max: Number($('#sp-fmax').value),
+      } })
+      toast('发送策略已保存')
+      await renderConfig()
+    } else if (act === 'reset-policy') {
+      await post('api/config', { send_policy: { interval_minutes: 3, daily_limit: 20, check_working_hours: true, work_start: 9, work_end: 18, auto_followup: false, followup_after_days: 3, followup_max: 2 } })
+      toast('已恢复默认发送策略')
+      await renderConfig()
     } else if (act === 'save-ai') {
       const r = await post('api/ai-config', {
         mode: $('#ai-mode').value, url: $('#ai-url').value, model: $('#ai-model').value,

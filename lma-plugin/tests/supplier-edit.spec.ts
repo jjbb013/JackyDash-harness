@@ -170,6 +170,39 @@ describe('定时备份（/api/backup-config + /api/backup/send-now，仅 admin�
   })
 })
 
+describe('业务画像 / 模板 / 发送策略编辑（/api/config POST，仅 admin）', () => {
+  it('staff 403；空提交 400；非法数字 400', async () => {
+    const denied = await fetch(`${base}/api/config`, { method: 'POST', headers: { cookie: staffCookie, 'content-type': 'application/json' }, body: '{}' })
+    expect(denied.status).toBe(403)
+    const empty = await fetch(`${base}/api/config`, { method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' }, body: '{}' })
+    expect(empty.status).toBe(400)
+    const bad = await fetch(`${base}/api/config`, { method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ send_policy: { interval_minutes: 0, work_start: 10, work_end: 8 } }) })
+    expect(bad.status).toBe(400)
+  })
+
+  it('保存画像/模板/策略并回读（表单化字段）', async () => {
+    const save = await fetch(`${base}/api/config`, { method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        profile: { company_name: 'Test Freight Co.', intro: 'Test intro', services: ['Ocean', 'Air'], strengths: ['Fast'], target_markets: ['NL', 'DE'] },
+        email_template: { subject_max: 70, body_max_words: 200, banned_words: ['free', 'cheap'], footer_source: 'Footer {source}' },
+        send_policy: { interval_minutes: 5, daily_limit: 30, check_working_hours: false, work_start: 8, work_end: 20, auto_followup: true, followup_after_days: 2, followup_max: 3 },
+      }) })
+    expect(save.status).toBe(200)
+    const r = (await save.json()) as { ok: boolean; changed: string[] }
+    expect(r.changed.sort()).toEqual(['email_template', 'profile', 'send_policy'])
+
+    const view = await fetch(`${base}/api/config`, { headers: { cookie: adminCookie } })
+    const d = (await view.json()) as { profile: { companyName: string; targetMarkets: string[] }; email_template: { subjectMax: number; bannedWords: string[] }; send_policy: { intervalMinutes: number; autoFollowup: boolean } }
+    expect(d.profile.companyName).toBe('Test Freight Co.')
+    expect(d.profile.targetMarkets).toEqual(['NL', 'DE'])
+    expect(d.email_template.subjectMax).toBe(70)
+    expect(d.email_template.bannedWords).toEqual(['free', 'cheap'])
+    expect(d.send_policy.intervalMinutes).toBe(5)
+    expect(d.send_policy.autoFollowup).toBe(true)
+  })
+})
+
 describe('SMTP / IMAP 配置（仅 admin）', () => {
   it('staff 访问配置端点 → 403', async () => {
     for (const p of ['/api/smtp-config', '/api/imap-config']) {
