@@ -61,8 +61,37 @@ export function dashboardPage(user: PageUser, chatHref = '/'): string {
   .row2 { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
   .expand { background:#fafafa; border-top:1px dashed var(--line); }
   pre { white-space:pre-wrap; margin:6px 0 0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
-  #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#111827; color:#fff; padding:8px 16px; border-radius:8px; display:none; z-index:99; }
   .err { color:var(--danger); }
+  /* ===== ui-polish：视觉增强 ===== */
+  .card, .stat { box-shadow:0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04); }
+  .stat { position:relative; }
+  .stat .v { color:var(--accent); }
+  .stat.s-green .v { color:var(--ok); }
+  .stat.s-red .v { color:var(--danger); }
+  .stat.s-amber .v { color:#d97706; }
+  .tag.follow_up { background:#f0fdf4; color:#15803d; }
+  .tag.drafted { background:#eef2ff; color:#4338ca; }
+  .tag.new { background:#f8fafc; color:#475569; border:1px solid var(--line); }
+  .tag.sent, .tag.approved { border:1px solid transparent; }
+  th { background:#fafbfc; letter-spacing:.02em; }
+  tbody tr:hover td { background:#f9fafb; }
+  input[type=text]:focus, input[type=number]:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+  button { transition:background .15s, color .15s, border-color .15s, opacity .15s; }
+  button.primary { box-shadow:0 1px 2px rgba(37,99,235,.25); }
+  .empty { text-align:center; padding:28px 12px; color:var(--muted); }
+  .bar { height:8px; border-radius:99px; background:#eef1f5; overflow:hidden; min-width:60px; }
+  .bar > i { display:block; height:100%; background:var(--accent); border-radius:99px; }
+  .group-h { cursor:pointer; user-select:none; }
+  .group-h:hover { background:#f6f7f9; border-radius:8px; }
+  .group-h .chev { display:inline-block; transition:transform .15s; }
+  .group-h.open .chev { transform:rotate(90deg); }
+  @media (max-width:900px) {
+    main { padding:12px; } header { padding:10px 12px; }
+    .ovgrid { grid-template-columns:1fr !important; }
+    .row2 { gap:6px; }
+    .table-wrap { overflow-x:auto; }
+    .table-wrap table { min-width:720px; }
+  }
 </style>
 </head>
 <body>
@@ -129,20 +158,22 @@ async function renderOverview() {
       '<span class="muted" style="font-size:10px;margin-top:3px;white-space:nowrap">' + t.day + '</span></div>').join('') +
     '</div><p class="muted" style="font-size:12px;margin:6px 0 0">柱高 = 当日发送量（峰值 ' + trendMax + ' 封）；悬停查看明细。</p></div>'
 
-  const countryRows = d.byCountry.map((r) => '<tr><td>' + esc(r.country) + '</td><td>' + r.c + '</td></tr>').join('')
-  const statusRows = d.byStatus.map((r) => '<tr><td>' + statusTag(r.status) + '</td><td>' + r.c + '</td></tr>').join('')
+  const maxC = Math.max(1, ...d.byCountry.map((r) => r.c))
+  const maxS = Math.max(1, ...d.byStatus.map((r) => r.c))
+  const countryRows = d.byCountry.map((r) => '<tr><td>' + esc(r.country) + '</td><td style="width:55%"><div class="bar"><i style="width:' + Math.round(r.c / maxC * 100) + '%"></i></div></td><td>' + r.c + '</td></tr>').join('')
+  const statusRows = d.byStatus.map((r) => '<tr><td>' + statusTag(r.status) + '</td><td style="width:55%"><div class="bar"><i style="width:' + Math.round(r.c / maxS * 100) + '%"></i></div></td><td>' + r.c + '</td></tr>').join('')
   $('#view').innerHTML =
     '<div class="stats">' +
-    stat(d.supplierTotal, '供应商总数') + stat(d.sent, '累计发送') + stat(d.replied, '累计回复') +
-    stat(d.replyRate + '%', '回复率') + stat(d.todaySent, '今日已发') + stat(d.queuePending, '发送队列中') + stat(d.pendingReview, '待审核草稿') +
+    stat(d.supplierTotal, '供应商总数') + stat(d.sent, '累计发送', 's-green') + stat(d.replied, '累计回复') +
+    stat(d.replyRate + '%', '回复率', 's-amber') + stat(d.todaySent, '今日已发', 's-green') + stat(d.queuePending, '发送队列中') + stat(d.pendingReview, '待审核草稿', 's-amber') +
     '</div>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px" class="ovgrid">' +
+    '<div class="ovgrid" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">' +
     '<div class="card"><b>国家分布</b><table style="margin-top:8px">' + countryRows + '</table></div>' +
     '<div class="card"><b>状态分布</b><table style="margin-top:8px">' + statusRows + '</table></div>' +
     '</div>' +
     trendHtml
 }
-function stat(v, k) { return '<div class="stat"><div class="v">' + esc(v) + '</div><div class="k">' + esc(k) + '</div></div>' }
+function stat(v, k, cls) { return '<div class="stat' + (cls ? ' ' + cls : '') + '"><div class="v">' + esc(v) + '</div><div class="k">' + esc(k) + '</div></div>' }
 
 // ---------- 审核队列 ----------
 async function renderReview() {
@@ -205,14 +236,18 @@ async function renderSuppliers() {
       '<option ' + (supQ.status === s ? 'selected' : '') + '>' + s + '</option>').join('') + '</select>' +
     '<button class="primary" onclick="searchSup()">筛选</button>' +
     '<button data-act="export">导出 CSV（当前筛选）</button>' +
+    '<button onclick="toggleGroupView()">' + (supGroupView ? '平铺视图' : '按国家分组') + '</button>' +
     '<span class="muted">共 ' + d.total + ' 条 · 第 ' + d.page + '/' + pages + ' 页</span>' +
     (d.page > 1 ? ' <button onclick="gotoPage(' + (d.page - 1) + ')">上一页</button>' : '') +
     (d.page < pages ? ' <button onclick="gotoPage(' + (d.page + 1) + ')">下一页</button>' : '') + '</div>' +
     batchBar +
-    '<table><tr>' + (isAdmin ? '<th></th>' : '') + '<th>ID</th><th>公司</th><th>邮箱</th><th>国家</th><th>状态</th><th>匹配度</th><th>操作</th></tr>' + rows + '</table></div>' +
+    (supGroupView ? groupedSuppliersHtml(d, isAdmin)
+                  : '<div class="table-wrap"><table><tr>' + (isAdmin ? '<th></th>' : '') + '<th>ID</th><th>公司</th><th>邮箱</th><th>国家</th><th>状态</th><th>匹配度</th><th>操作</th></tr>' + rows + '</table></div>') +
+    '</div>' +
     supEditModal() +
     importCard()
 }
+window.toggleGroupView = () => { supGroupView = !supGroupView; renderSuppliers() }
 
 // ---------- 供应商编辑 / 删除 ----------
 function supEditModal() {
@@ -254,6 +289,38 @@ window.batchDraft = async () => {
 }
 function selectedSupIds() {
   return Array.from(document.querySelectorAll('.sup-check:checked')).map((c) => Number(c.dataset.id))
+}
+
+// ===== ui-polish：按国家分组视图（组标题含时区/当地时间/数量，可折叠）=====
+let supGroupView = false
+window.toggleGroup = (h) => { h.classList.toggle('open'); const b = h.nextElementSibling; if (b) b.style.display = b.style.display === 'none' ? 'block' : 'none' }
+function groupLocalTime(tz) {
+  if (!tz) return '—'
+  try { return new Date().toLocaleString('zh-CN', { timeZone: tz, hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } catch { return '—' }
+}
+function supRowHtml(r, isAdmin) {
+  return (isAdmin ? '<td><input type="checkbox" class="sup-check" data-id="' + r.id + '"></td>' : '<td></td>') +
+    '<td>' + r.id + '</td><td>' + esc(r.company_name) + '<br><span class="muted">' + esc(r.contact_name || '') + '</span></td>' +
+    '<td>' + esc(r.email) + '</td><td>' + esc(r.country || '—') + '</td><td>' + statusTag(r.status) + '</td>' +
+    '<td>' + (r.match_score ?? '—') + '</td><td style="white-space:nowrap">' +
+    '<a href="javascript:void 0" onclick="toggleDetail(' + r.id + ')">详情</a>' +
+    (isAdmin ? ' <a href="javascript:void 0" onclick="openSupEdit(' + r.id + ')">编辑</a>' +
+    ' <a href="javascript:void 0" onclick="delSup(' + r.id + ')">删除</a>' : '') +
+    '</td></tr>' +
+    '<tr id="detail-' + r.id + '" style="display:none"><td colspan="9" class="expand"><div class="muted">加载中…</div></td></tr>'
+}
+function groupedSuppliersHtml(d, isAdmin) {
+  const by = {}
+  d.rows.forEach((r) => { const k = r.country || '(未分组)'; (by[k] = by[k] || []).push(r) })
+  return Object.entries(by).map(([c, list]) => {
+    const tz = list[0].timezone || ''
+    const head = '<div class="group-h row2 open" style="margin:0" onclick="toggleGroup(this)"><span class="chev">▶</span>' +
+      '<b>' + esc(c) + '</b><span class="muted">' + (tz ? esc(tz) + ' · 当地时间 ' + groupLocalTime(tz) + ' · ' : '') + list.length + ' 条</span></div>'
+    const body = '<div class="table-wrap" style="margin-top:6px"><table>' +
+      '<tr>' + (isAdmin ? '<th></th>' : '') + '<th>ID</th><th>公司</th><th>邮箱</th><th>国家</th><th>状态</th><th>匹配度</th><th>操作</th></tr>' +
+      list.map((r) => supRowHtml(r, isAdmin)).join('') + '</table></div>'
+    return '<div class="card" style="padding:10px 16px;margin-bottom:10px">' + head + body + '</div>'
+  }).join('')
 }
 
 // ---------- CSV 导入（仅 admin；与 Agent 工具共用同一套管道） ----------
